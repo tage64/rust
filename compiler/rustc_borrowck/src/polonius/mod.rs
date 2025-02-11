@@ -47,11 +47,15 @@ mod constraints;
 mod dump;
 pub(crate) mod legacy;
 mod liveness_constraints;
+#[allow(dead_code, unused_variables)]
+mod loan_invalidations;
 mod loan_liveness;
 mod typeck_constraints;
 
 use std::collections::BTreeMap;
 
+use legacy::PoloniusLocationTable;
+use loan_invalidations::compute_relevant_outlives_constraints;
 use rustc_data_structures::fx::FxHashSet;
 use rustc_index::bit_set::SparseBitMatrix;
 use rustc_index::interval::SparseIntervalMatrix;
@@ -156,16 +160,20 @@ impl PoloniusContext {
         regioncx: &mut RegionInferenceContext<'tcx>,
         body: &Body<'tcx>,
         borrow_set: &BorrowSet<'tcx>,
+        location_table: &PoloniusLocationTable,
     ) -> PoloniusDiagnosticsContext {
         let PoloniusLivenessContext { live_region_variances, boring_nll_locals } =
             self.liveness_context;
+
+        let relevant_outlives_constraints =
+            compute_relevant_outlives_constraints(tcx, regioncx, body, borrow_set, location_table);
 
         let mut localized_outlives_constraints = LocalizedOutlivesConstraintSet::default();
         convert_typeck_constraints(
             tcx,
             body,
             regioncx.liveness_constraints(),
-            regioncx.outlives_constraints(),
+            relevant_outlives_constraints.iter().copied(),
             regioncx.universal_regions(),
             &mut localized_outlives_constraints,
         );
@@ -185,7 +193,7 @@ impl PoloniusContext {
             tcx,
             body,
             regioncx.liveness_constraints(),
-            regioncx.outlives_constraints(),
+            relevant_outlives_constraints.iter().copied(),
             borrow_set,
             &localized_outlives_constraints,
         );

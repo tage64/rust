@@ -565,6 +565,11 @@ impl<'tcx> RegionInferenceContext<'tcx> {
         self.definitions.indices()
     }
 
+    /// Returns the largest region variable ID.
+    pub(crate) fn last_region_vid(&self) -> Option<RegionVid> {
+        self.definitions.last_index()
+    }
+
     /// Given a universal region in scope on the MIR, returns the
     /// corresponding index.
     ///
@@ -1848,6 +1853,18 @@ impl<'tcx> RegionInferenceContext<'tcx> {
         }
 
         None
+    }
+
+    /// Given a region R, returns an iterator over all constraints R: R1.
+    pub fn outgoing_outlives_constraints(
+        &self,
+        region: RegionVid,
+    ) -> impl Iterator<Item = OutlivesConstraint<'tcx>> + use<'_, 'tcx> {
+        return self.constraint_graph.outgoing_edges(
+            region,
+            &self.constraints,
+            self.universal_regions().fr_static,
+        );
     }
 
     /// Finds some region R such that `fr1: R` and `R` is live at `location`.
