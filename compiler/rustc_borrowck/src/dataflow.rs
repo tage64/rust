@@ -322,7 +322,26 @@ impl<'tcx> PoloniusOutOfScopePrecomputer<'_, 'tcx> {
             prec.precompute_loans_out_of_scope(loan_idx, issuing_region, loan_issued_at);
         }
 
-        prec.loans_out_of_scope_at_location
+        let polonius_loans_out_of_scope = regioncx.loans_out_of_scope_at_location.as_ref().unwrap();
+        assert!(
+            prec.loans_out_of_scope_at_location.iter().all(|(l, bs)| {
+                polonius_loans_out_of_scope
+                    .get(l)
+                    .is_some_and(|bs_polonius| bs.iter().all(|b| bs_polonius.contains(b)))
+            }),
+            "Polonius' loans out of scope should be a superset of the real one.\n{:?}\n{:?}\n{}\n",
+            polonius_loans_out_of_scope,
+            &prec.loans_out_of_scope_at_location,
+            crate::polonius::the_great_solution::format_body_with_borrows(body, borrow_set),
+        );
+        assert_eq!(
+            polonius_loans_out_of_scope,
+            &prec.loans_out_of_scope_at_location,
+            "{}",
+            crate::polonius::the_great_solution::format_body_with_borrows(body, borrow_set),
+        );
+        polonius_loans_out_of_scope.clone()
+        //prec.loans_out_of_scope_at_location
     }
 
     /// Loans are in scope while they are live: whether they are contained within any live region.

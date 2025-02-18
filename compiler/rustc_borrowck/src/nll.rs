@@ -140,7 +140,7 @@ pub(crate) fn compute_regions<'a, 'tcx>(
         var_infos,
         constraints,
         universal_region_relations,
-        location_map,
+        location_map.clone(),
     );
 
     // If requested for `-Zpolonius=next`, convert NLL constraints to localized outlives constraints
@@ -151,7 +151,7 @@ pub(crate) fn compute_regions<'a, 'tcx>(
             &mut regioncx,
             body,
             borrow_set,
-            location_table,
+            &location_map,
         )
     });
 

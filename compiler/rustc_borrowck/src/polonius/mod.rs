@@ -50,18 +50,17 @@ mod liveness_constraints;
 #[allow(dead_code, unused_variables)]
 mod loan_invalidations;
 mod loan_liveness;
+pub(crate) mod the_great_solution;
 mod typeck_constraints;
 
 use std::collections::BTreeMap;
 
-use legacy::PoloniusLocationTable;
-use loan_invalidations::compute_relevant_outlives_constraints;
 use rustc_data_structures::fx::FxHashSet;
 use rustc_index::bit_set::SparseBitMatrix;
 use rustc_index::interval::SparseIntervalMatrix;
 use rustc_middle::mir::{Body, Local};
 use rustc_middle::ty::{RegionVid, TyCtxt};
-use rustc_mir_dataflow::points::PointIndex;
+use rustc_mir_dataflow::points::{DenseLocationMap, PointIndex};
 
 pub(crate) use self::constraints::*;
 pub(crate) use self::dump::dump_polonius_mir;
@@ -160,20 +159,20 @@ impl PoloniusContext {
         regioncx: &mut RegionInferenceContext<'tcx>,
         body: &Body<'tcx>,
         borrow_set: &BorrowSet<'tcx>,
-        location_table: &PoloniusLocationTable,
+        location_map: &DenseLocationMap,
     ) -> PoloniusDiagnosticsContext {
         let PoloniusLivenessContext { live_region_variances, boring_nll_locals } =
             self.liveness_context;
 
-        let relevant_outlives_constraints =
-            compute_relevant_outlives_constraints(tcx, regioncx, body, borrow_set, location_table);
+        //let relevant_outlives_constraints =
+        //    compute_relevant_outlives_constraints(tcx, regioncx, body, borrow_set, location_table);
 
         let mut localized_outlives_constraints = LocalizedOutlivesConstraintSet::default();
         convert_typeck_constraints(
             tcx,
             body,
             regioncx.liveness_constraints(),
-            relevant_outlives_constraints.iter().copied(),
+            regioncx.outlives_constraints(),
             regioncx.universal_regions(),
             &mut localized_outlives_constraints,
         );
@@ -193,11 +192,21 @@ impl PoloniusContext {
             tcx,
             body,
             regioncx.liveness_constraints(),
-            relevant_outlives_constraints.iter().copied(),
+            regioncx.outlives_constraints(),
             borrow_set,
             &localized_outlives_constraints,
         );
         regioncx.record_live_loans(live_loans);
+
+        regioncx.loans_out_of_scope_at_location =
+            Some(the_great_solution::compute_loans_out_of_scope(
+                tcx,
+                regioncx,
+                body,
+                location_map,
+                borrow_set,
+                &live_region_variances,
+            ));
 
         PoloniusDiagnosticsContext { localized_outlives_constraints, boring_nll_locals }
     }
