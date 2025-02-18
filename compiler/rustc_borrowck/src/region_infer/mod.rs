@@ -195,6 +195,9 @@ pub struct RegionInferenceContext<'tcx> {
     /// Information about how the universally quantified regions in
     /// scope on this function relate to one another.
     universal_region_relations: Frozen<UniversalRegionRelations<'tcx>>,
+
+    /// Information about when loans goes out of scope computed by Polonius.
+    pub(crate) loans_out_of_scope_at_location: Option<FxIndexMap<Location, Vec<BorrowIndex>>>,
 }
 
 /// Each time that `apply_member_constraint` is successful, it appends
@@ -463,6 +466,7 @@ impl<'tcx> RegionInferenceContext<'tcx> {
             scc_values,
             type_tests,
             universal_region_relations,
+            loans_out_of_scope_at_location: None,
         };
 
         result.init_free_and_bound_regions();
@@ -565,6 +569,11 @@ impl<'tcx> RegionInferenceContext<'tcx> {
     /// Returns an iterator over all the region indices.
     pub(crate) fn regions(&self) -> impl Iterator<Item = RegionVid> + 'tcx {
         self.definitions.indices()
+    }
+
+    /// Returns the largest region variable ID.
+    pub(crate) fn last_region_vid(&self) -> Option<RegionVid> {
+        self.definitions.last_index()
     }
 
     /// Given a universal region in scope on the MIR, returns the

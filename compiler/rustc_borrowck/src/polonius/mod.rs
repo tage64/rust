@@ -48,6 +48,7 @@ mod dump;
 pub(crate) mod legacy;
 mod liveness_constraints;
 mod loan_liveness;
+pub(crate) mod the_great_solution;
 mod typeck_constraints;
 
 use std::collections::BTreeMap;
@@ -57,7 +58,7 @@ use rustc_index::bit_set::SparseBitMatrix;
 use rustc_index::interval::SparseIntervalMatrix;
 use rustc_middle::mir::{Body, Local};
 use rustc_middle::ty::{RegionVid, TyCtxt};
-use rustc_mir_dataflow::points::PointIndex;
+use rustc_mir_dataflow::points::{DenseLocationMap, PointIndex};
 
 pub(crate) use self::constraints::*;
 pub(crate) use self::dump::dump_polonius_mir;
@@ -156,6 +157,7 @@ impl PoloniusContext {
         regioncx: &mut RegionInferenceContext<'tcx>,
         body: &Body<'tcx>,
         borrow_set: &BorrowSet<'tcx>,
+        location_map: &DenseLocationMap,
     ) -> PoloniusDiagnosticsContext {
         let PoloniusLivenessContext { live_region_variances, boring_nll_locals } =
             self.liveness_context;
@@ -190,6 +192,16 @@ impl PoloniusContext {
             &localized_outlives_constraints,
         );
         regioncx.record_live_loans(live_loans);
+
+        regioncx.loans_out_of_scope_at_location =
+            Some(the_great_solution::compute_loans_out_of_scope(
+                tcx,
+                regioncx,
+                body,
+                location_map,
+                borrow_set,
+                &live_region_variances,
+            ));
 
         PoloniusDiagnosticsContext { localized_outlives_constraints, boring_nll_locals }
     }
