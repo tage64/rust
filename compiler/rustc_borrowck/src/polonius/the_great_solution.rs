@@ -1,21 +1,18 @@
-use std::assert_matches::assert_matches;
+#![allow(dead_code)]
+mod constraints;
 use std::collections::{BTreeMap, BTreeSet};
-use std::mem;
 use std::sync::LazyLock;
 
-use rustc_data_structures::fx::{FxHashMap, FxHashSet, FxIndexMap};
+use constraints::Constraints;
+use rustc_data_structures::fx::{FxHashMap, FxIndexMap};
 use rustc_index::bit_set::{DenseBitSet, SparseBitMatrix};
 use rustc_index::{Idx, IndexVec};
-use rustc_middle::mir::{
-    BasicBlock, Body, Location, Statement, StatementKind, Terminator, TerminatorKind,
-};
-use rustc_middle::ty::{TyCtxt, TypeVisitable};
+use rustc_middle::mir::{BasicBlock, Body, Location};
+use rustc_middle::ty::TyCtxt;
 use rustc_mir_dataflow::points::DenseLocationMap;
 
 use super::ConstraintDirection;
 use super::loan_liveness::collect_kills;
-use crate::constraints::OutlivesConstraint;
-use crate::type_check::Locations;
 use crate::{BorrowIndex, BorrowSet, RegionInferenceContext, RegionVid};
 
 /// This toggles the `my_println!` and `my_print!` macros. Those macros are used here and there to
@@ -44,7 +41,7 @@ pub(crate) use my_print;
 
 pub(super) fn compute_loans_out_of_scope<'tcx>(
     tcx: TyCtxt<'tcx>,
-    regioncx: &mut RegionInferenceContext<'tcx>,
+    regioncx: &RegionInferenceContext<'tcx>,
     body: &Body<'tcx>,
     location_map: &DenseLocationMap,
     borrow_set: &BorrowSet<'tcx>,
@@ -58,6 +55,7 @@ pub(super) fn compute_loans_out_of_scope<'tcx>(
         borrow_set,
         live_region_variances,
     );
+
     for borrow_idx in borrow_set.indices() {
         polonius.compute_loan_out_of_scope(borrow_idx);
     }
@@ -90,74 +88,18 @@ struct PoloniusOutOfScopePrecomputer<'a, 'tcx> {
     /// All regions that flows backward.
     backward_regions: DenseBitSet<RegionVid>,
 
+    /// All outlives constraints.
+    constraints: Constraints<'a, 'tcx>,
+
     /// A mapping from locations in the CFG to a set of loans that go out of scope. This will be the
     /// final result of the computation.
     loans_out_of_scope: IndexVec<BorrowIndex, FxIndexMap<PoloniusBlock, BTreeSet<usize>>>,
 
     tcx: TyCtxt<'tcx>,
-    regioncx: &'a mut RegionInferenceContext<'tcx>,
+    regioncx: &'a RegionInferenceContext<'tcx>,
     body: &'a Body<'tcx>,
-    #[allow(dead_code)] // TODO: I keep this until I know I don't need it.
     location_map: &'a DenseLocationMap,
     borrow_set: &'a BorrowSet<'tcx>,
-}
-
-#[derive(Default)]
-struct TimeTravellingRegions {
-    to_prev_stmt: Option<DenseBitSet<RegionVid>>,
-    to_proceeding_blocks: Option<SparseBitMatrix<BasicBlock, RegionVid>>,
-    to_next_loc: Option<DenseBitSet<RegionVid>>,
-    to_succeeding_blocks: Option<SparseBitMatrix<BasicBlock, RegionVid>>,
-}
-
-#[derive(Debug, Copy, Clone)]
-enum TimeTravelDirection {
-    Backwards,
-    Forwards,
-}
-
-impl TimeTravellingRegions {
-    fn add_within_block(
-        &mut self,
-        regioncx: &RegionInferenceContext<'_>,
-        region: RegionVid,
-        direction: TimeTravelDirection,
-    ) {
-        match direction {
-            TimeTravelDirection::Forwards => {
-                self.to_next_loc
-                    .get_or_insert_with(|| new_empty_region_set(regioncx))
-                    .insert(region);
-            }
-            TimeTravelDirection::Backwards => {
-                self.to_prev_stmt
-                    .get_or_insert_with(|| new_empty_region_set(regioncx))
-                    .insert(region);
-            }
-        }
-    }
-
-    fn add_to_proceeding_block(
-        &mut self,
-        regioncx: &RegionInferenceContext<'_>,
-        region: RegionVid,
-        proceeding_block: BasicBlock,
-    ) {
-        self.to_proceeding_blocks
-            .get_or_insert_with(|| new_region_matrix(regioncx))
-            .insert(proceeding_block, region);
-    }
-
-    fn add_to_succeeding_block(
-        &mut self,
-        regioncx: &RegionInferenceContext<'_>,
-        region: RegionVid,
-        succeeding_block: BasicBlock,
-    ) {
-        self.to_succeeding_blocks
-            .get_or_insert_with(|| new_region_matrix(regioncx))
-            .insert(succeeding_block, region);
-    }
 }
 
 /// A `PoloniusBlock` is a `BasicBlock` which distinguishes between before and after the reserve
@@ -187,7 +129,7 @@ struct LoanRegionNode {
 impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
     fn new(
         tcx: TyCtxt<'tcx>,
-        regioncx: &'a mut RegionInferenceContext<'tcx>,
+        regioncx: &'a RegionInferenceContext<'tcx>,
         body: &'a Body<'tcx>,
         location_map: &'a DenseLocationMap,
         borrow_set: &'a BorrowSet<'tcx>,
@@ -238,8 +180,14 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
         my_println!("Backward regions: {:?}", backward_regions);
         my_println!("Live region variances: {:?}", live_region_variances);
 
+        let mut constraints = Constraints::new(tcx, regioncx, body, location_map);
+        for constraint in regioncx.outlives_constraints() {
+            constraints.add_constraint(&constraint);
+        }
+
         Self {
             loans_out_of_scope: IndexVec::from_fn_n(|_| Default::default(), borrow_set.len()),
+            constraints,
             kills,
             forward_regions,
             backward_regions,
@@ -350,16 +298,18 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
             );
 
             // Add constraints.
-            let time_travelling_regions =
-                self.add_dependent_regions_at_location(location, &mut added_regions);
+            let time_travelling_regions = self.constraints.add_dependent_regions_at_point(
+                self.location_map.point_from_location(location),
+                &mut added_regions,
+            );
             if let Some(tf) = &time_travelling_regions.to_next_loc {
                 my_println!("    Forward time travellers: {:?}", tf);
             }
             if let Some(tf) = &time_travelling_regions.to_prev_stmt {
                 my_println!("    Backward time travellers: {:?}", tf);
             }
-            if let Some(x) = &time_travelling_regions.to_proceeding_blocks {
-                my_println!("    To proceeding blocks: {:?}", x);
+            if let Some(x) = &time_travelling_regions.to_preceeding_blocks {
+                my_println!("    To preceeding blocks: {:?}", x);
             }
             if let Some(x) = &time_travelling_regions.to_succeeding_blocks {
                 my_println!("    To succeeding blocks: {:?}", x);
@@ -510,7 +460,7 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                         });
                     if !(is_killed && location.is_predecessor_of(predecessor_location, self.body)) {
                         if let Some(time_travellers) = time_travelling_regions
-                            .to_proceeding_blocks
+                            .to_preceeding_blocks
                             .as_ref()
                             .and_then(|x| x.row(predecessor_block))
                         {
@@ -550,223 +500,6 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                 region_set.remove(region);
             }
         }
-    }
-
-    // TODO: This algorithm is extremly slow.
-    fn add_dependent_regions_at_location(
-        &self,
-        location: Location,
-        associated_regions: &mut DenseBitSet<RegionVid>,
-    ) -> TimeTravellingRegions {
-        // FIXME: Only for debugging.
-        my_println!("    Regions for constraints: {:?}", associated_regions);
-        for constraint in self.regioncx.outlives_constraints() {
-            if let Locations::Single(l) = constraint.locations {
-                if l == location {
-                    my_println!("      {:?}: {:?}", constraint.sup, constraint.sub);
-                }
-            }
-        }
-
-        let mut to_check = associated_regions.clone();
-        let mut to_check_next_round = new_empty_region_set(self.regioncx);
-        let mut time_travelling_regions = TimeTravellingRegions::default();
-
-        while !to_check.is_empty() {
-            for constraint in self.regioncx.outlives_constraints() {
-                if !to_check.contains(constraint.sup) {
-                    continue;
-                }
-
-                if self.add_time_traveller(location, &constraint, &mut time_travelling_regions) {
-                    // If the region is time travelling we should not add it to
-                    // `associated_regions`.
-                    continue;
-                }
-
-                if let Locations::Single(l) = constraint.locations
-                    && l != location
-                {
-                    continue;
-                }
-
-                if associated_regions.insert(constraint.sub) {
-                    to_check_next_round.insert(constraint.sub);
-                }
-            }
-            mem::swap(&mut to_check, &mut to_check_next_round);
-            to_check_next_round.clear();
-        }
-
-        time_travelling_regions
-    }
-
-    /// Check if this constraint is travelling in time and if so add it to `time_travellers` and
-    /// return true, otherwise return false.
-    fn add_time_traveller(
-        &self,
-        location: Location,
-        constraint: &OutlivesConstraint<'tcx>,
-        time_travellers: &mut TimeTravellingRegions,
-    ) -> bool {
-        match constraint.locations {
-            Locations::Single(l) if l == location => {
-                if let Some(stmt) = self.body[location.block].statements.get(l.statement_index) {
-                    match self.time_traveller_at_statement(constraint, stmt) {
-                        Some(t @ TimeTravelDirection::Forwards) => {
-                            time_travellers.add_within_block(self.regioncx, constraint.sub, t);
-                            true
-                        }
-                        Some(TimeTravelDirection::Backwards) | None => false,
-                    }
-                } else {
-                    debug_assert_eq!(l.statement_index, self.body[l.block].statements.len());
-                    let terminator = self.body[l.block].terminator();
-                    match self.time_traveller_at_terminator(constraint, terminator) {
-                        Some((TimeTravelDirection::Forwards, target_block)) => {
-                            time_travellers.add_to_succeeding_block(
-                                self.regioncx,
-                                constraint.sub,
-                                target_block,
-                            );
-                            true
-                        }
-                        Some((TimeTravelDirection::Backwards, _)) | None => false,
-                    }
-                }
-            }
-            Locations::Single(l) if l.successor_within_block() == location => {
-                let stmt = self.body[location.block].statements.get(l.statement_index).unwrap();
-                match self.time_traveller_at_statement(constraint, stmt) {
-                    Some(t @ TimeTravelDirection::Backwards) => {
-                        time_travellers.add_within_block(self.regioncx, constraint.sub, t);
-                        true
-                    }
-                    Some(TimeTravelDirection::Forwards) | None => false,
-                }
-            }
-            Locations::Single(l) => {
-                let block_data = &self.body[l.block];
-                if l.statement_index == block_data.statements.len()
-                    && block_data.terminator().successors().any(|b| b == location.block)
-                {
-                    let terminator = self.body[l.block].terminator();
-                    match self.time_traveller_at_terminator(constraint, terminator) {
-                        Some((TimeTravelDirection::Backwards, source_block)) => {
-                            time_travellers.add_to_proceeding_block(
-                                self.regioncx,
-                                constraint.sub,
-                                source_block,
-                            );
-                            true
-                        }
-                        Some((TimeTravelDirection::Forwards, _)) | None => false,
-                    }
-                } else {
-                    false
-                }
-            }
-            Locations::All(_) => false,
-        }
-    }
-
-    fn time_traveller_at_statement(
-        &self,
-        constraint: &OutlivesConstraint<'tcx>,
-        statement: &Statement<'tcx>,
-    ) -> Option<TimeTravelDirection> {
-        match &statement.kind {
-            StatementKind::Assign(box (lhs, rhs)) => {
-                // TODO: Check this comment:
-                // To create localized outlives constraints without midpoints, we rely on the property
-                // that no input regions from the RHS of the assignment will flow into themselves: they
-                // should not appear in the output regions in the LHS. We believe this to be true by
-                // construction of the MIR, via temporaries, and assert it here.
-                //
-                // We think we don't need midpoints because:
-                // - every LHS Place has a unique set of regions that don't appear elsewhere
-                // - this implies that for them to be part of the RHS, the same Place must be read and
-                //   written
-                // - and that should be impossible in MIR
-                //
-                // When we have a more complete implementation in the future, tested with crater, etc,
-                // we can maybe remove this assertion.
-                debug_assert!(
-                    {
-                        let mut lhs_regions = FxHashSet::default();
-                        self.tcx.for_each_free_region(lhs, |region| {
-                            let region = self.regioncx.universal_regions().to_region_vid(region);
-                            lhs_regions.insert(region);
-                        });
-
-                        let mut rhs_regions = FxHashSet::default();
-                        self.tcx.for_each_free_region(rhs, |region| {
-                            let region = self.regioncx.universal_regions().to_region_vid(region);
-                            rhs_regions.insert(region);
-                        });
-
-                        // The intersection between LHS and RHS regions should be empty.
-                        lhs_regions.is_disjoint(&rhs_regions)
-                    },
-                    "there should be no common regions between the LHS and RHS of an assignment"
-                );
-
-                // As mentioned earlier, we should be tracking these better upstream but: we want to
-                // relate the types on entry to the type of the place on exit. That is, outlives
-                // constraints on the RHS are on entry, and outlives constraints to/from the LHS are on
-                // exit (i.e. on entry to the successor location).
-                let lhs_ty = self.body.local_decls[lhs.local].ty;
-                self.compute_constraint_direction(constraint, &lhs_ty)
-            }
-            _ => None,
-        }
-    }
-
-    fn time_traveller_at_terminator(
-        &self,
-        constraint: &OutlivesConstraint<'tcx>,
-        terminator: &Terminator<'tcx>,
-    ) -> Option<(TimeTravelDirection, BasicBlock)> {
-        // FIXME: check if other terminators need the same handling as `Call`s, in particular
-        // Assert/Yield/Drop. A handful of tests are failing with Drop related issues, as well as some
-        // coroutine tests, and that may be why.
-        match &terminator.kind {
-            // FIXME: also handle diverging calls.
-            TerminatorKind::Call { destination, target: Some(target_block), .. } => {
-                // Calls are similar to assignments, and thus follow the same pattern. If there is a
-                // target for the call we also relate what flows into the destination here to entry to
-                // that successor.
-                let destination_ty = destination.ty(&self.body.local_decls, self.tcx);
-                self.compute_constraint_direction(constraint, &destination_ty)
-                    .map(|t| (t, *target_block))
-            }
-            _ => None,
-        }
-    }
-
-    /// For a given outlives constraint and CFG edge, returns the localized constraint with the
-    /// appropriate `from`-`to` direction. This is computed according to whether the constraint flows to
-    /// or from a free region in the given `value`, some kind of result for an effectful operation, like
-    /// the LHS of an assignment.
-    fn compute_constraint_direction(
-        &self,
-        constraint: &OutlivesConstraint<'tcx>,
-        value: &impl TypeVisitable<TyCtxt<'tcx>>,
-    ) -> Option<TimeTravelDirection> {
-        let mut dir = None;
-        self.tcx.for_each_free_region(value, |region| {
-            let region = self.regioncx.universal_regions().to_region_vid(region);
-            if region == constraint.sub {
-                // This constraint flows into the result, its effects start becoming visible on exit.
-                assert_matches!(dir, None | Some(TimeTravelDirection::Forwards));
-                dir = Some(TimeTravelDirection::Forwards);
-            } else if region == constraint.sup {
-                // This constraint flows from the result, its effects start becoming visible on exit.
-                assert_matches!(dir, None | Some(TimeTravelDirection::Backwards));
-                dir = Some(TimeTravelDirection::Backwards);
-            }
-        });
-        dir
     }
 
     fn add_kill(&mut self, loan_idx: BorrowIndex, location: Location) {
@@ -822,6 +555,7 @@ fn num_regions(regioncx: &RegionInferenceContext<'_>) -> usize {
     regioncx.last_region_vid().map_or(0, |x| x.index() + 1)
 }
 
+/// FIXME: Just for debugging.
 pub(crate) fn format_body_with_borrows<'tcx>(
     body: &Body<'tcx>,
     borrow_set: &BorrowSet<'tcx>,
