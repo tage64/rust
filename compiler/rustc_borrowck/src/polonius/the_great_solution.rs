@@ -344,11 +344,12 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                         added_to_stack: false,
                     });
                 if !is_killed {
+                    self.remove_dead_regions(location, &mut forward_regions);
+                    self.remove_dead_regions(successor_location, &mut forward_regions);
                     if let Some(time_travellers) = &time_travelling_regions.to_next_loc {
                         forward_regions.union(time_travellers);
                     }
                     forward_regions.subtract(&successor_node.associated_regions);
-                    self.remove_dead_regions(successor_location, &mut forward_regions);
                 } else {
                     forward_regions.clear();
                 }
@@ -378,6 +379,8 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                             added_to_stack: false,
                         });
                     if !is_killed {
+                        self.remove_dead_regions(location, &mut forward_regions);
+                        self.remove_dead_regions(successor_location, &mut forward_regions);
                         if let Some(time_travellers) = time_travelling_regions
                             .to_succeeding_blocks
                             .as_ref()
@@ -386,7 +389,6 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                             forward_regions.union(time_travellers);
                         }
                         forward_regions.subtract(&successor_node.associated_regions);
-                        self.remove_dead_regions(successor_location, &mut forward_regions);
                     } else {
                         forward_regions.clear();
                     }
@@ -423,11 +425,12 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                         added_to_stack: false,
                     });
                 if !(is_killed && location.is_predecessor_of(predecessor_location, self.body)) {
+                    self.remove_dead_regions(location, &mut backward_regions);
+                    self.remove_dead_regions(predecessor_location, &mut backward_regions);
                     if let Some(time_travellers) = &time_travelling_regions.to_prev_stmt {
                         backward_regions.union(time_travellers);
                     }
                     backward_regions.subtract(&predecessor_node.associated_regions);
-                    self.remove_dead_regions(predecessor_location, &mut backward_regions);
                 } else {
                     backward_regions.clear();
                 }
@@ -459,6 +462,8 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                             added_to_stack: false,
                         });
                     if !(is_killed && location.is_predecessor_of(predecessor_location, self.body)) {
+                        self.remove_dead_regions(location, &mut backward_regions);
+                        self.remove_dead_regions(predecessor_location, &mut backward_regions);
                         if let Some(time_travellers) = time_travelling_regions
                             .to_preceeding_blocks
                             .as_ref()
@@ -467,7 +472,6 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                             backward_regions.union(time_travellers);
                         }
                         backward_regions.subtract(&predecessor_node.associated_regions);
-                        self.remove_dead_regions(predecessor_location, &mut backward_regions);
                     } else {
                         backward_regions.clear();
                     }
