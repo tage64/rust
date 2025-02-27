@@ -1,3 +1,4 @@
+#![expect(dead_code)]
 use std::collections::VecDeque;
 use std::rc::Rc;
 
