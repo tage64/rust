@@ -21,6 +21,23 @@ pub(crate) const MY_DEBUG_PRINTS: LazyLock<bool> = LazyLock::new(|| {
     matches!(std::env::var("POLONIUS_TRACING").as_ref().map(String::as_str), Ok("1"))
 });
 
+const DIAGNOSTIC_FILE: LazyLock<Option<std::path::PathBuf>> = LazyLock::new(|| {
+    std::env::var_os("POLONIUS_DIAGNOSTIC_DIR").map(|dir_path| {
+        use std::time::SystemTime;
+        let mut path = std::path::PathBuf::from(dir_path);
+        std::fs::create_dir_all(&path).unwrap();
+        let file_name = format!(
+            "polonius_diagnostic_{}.csv",
+            SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_nanos()
+                % 1000000000
+        );
+        path.push(file_name);
+        path
+    })
+});
+
+const DIAGNOSTIC_FILE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 macro_rules! my_println {
     ($($x:expr),*) => {
         if *crate::polonius::the_great_solution::MY_DEBUG_PRINTS {
@@ -47,6 +64,16 @@ pub(super) fn compute_loans_out_of_scope<'tcx>(
     borrow_set: &BorrowSet<'tcx>,
     live_region_variances: &BTreeMap<RegionVid, ConstraintDirection>,
 ) -> FxIndexMap<Location, Vec<BorrowIndex>> {
+    // FIXME: Diagnostics
+    if let Some(diagnostic_file_path) = &*DIAGNOSTIC_FILE {
+        use std::io::Write;
+        let lock = &DIAGNOSTIC_FILE_LOCK;
+        let _guard = lock.lock().unwrap();
+        let mut f =
+            std::fs::File::options().append(true).create(true).open(diagnostic_file_path).unwrap();
+        writeln!(&mut f, "{}, {}", num_regions(regioncx), location_map.num_points()).unwrap();
+    }
+
     let mut polonius = PoloniusOutOfScopePrecomputer::new(
         tcx,
         regioncx,
