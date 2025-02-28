@@ -499,7 +499,18 @@ impl<'a, 'tcx> Borrows<'a, 'tcx> {
             } else {
                 // Uncomment to activate old Polonius.
                 //PoloniusOutOfScopePrecomputer::compute(body, regioncx, borrow_set)
-                regioncx.loans_out_of_scope_at_location.as_ref().unwrap().clone()
+                let polonius_loans_out_of_scope =
+                    regioncx.loans_out_of_scope_at_location.as_ref().unwrap().clone();
+                // Uncomment to compare with NLL.
+                let nll_loans_out_of_scope =
+                    calculate_borrows_out_of_scope_at_location(body, regioncx, borrow_set);
+                assert_eq!(
+                    polonius_loans_out_of_scope,
+                    nll_loans_out_of_scope,
+                    "{}",
+                    crate::polonius::the_great_solution::format_body_with_borrows(body, borrow_set),
+                );
+                polonius_loans_out_of_scope
             };
         Borrows { tcx, body, borrow_set, borrows_out_of_scope_at_location }
     }
