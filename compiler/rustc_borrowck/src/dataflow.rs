@@ -1,5 +1,3 @@
-#![expect(dead_code)]
-
 use std::fmt;
 
 use rustc_data_structures::fx::FxIndexMap;
@@ -497,9 +495,7 @@ impl<'a, 'tcx> Borrows<'a, 'tcx> {
             if !tcx.sess.opts.unstable_opts.polonius.is_next_enabled() {
                 calculate_borrows_out_of_scope_at_location(body, regioncx, borrow_set)
             } else {
-                // Uncomment to activate old Polonius.
-                //PoloniusOutOfScopePrecomputer::compute(body, regioncx, borrow_set)
-                regioncx.loans_out_of_scope_at_location.as_ref().unwrap().clone()
+                PoloniusOutOfScopePrecomputer::compute(body, regioncx, borrow_set)
             };
         Borrows { tcx, body, borrow_set, borrows_out_of_scope_at_location }
     }

@@ -43,8 +43,6 @@
 //! 4) transfer this back to the main borrowck procedure: it handles computing errors and
 //!    diagnostics, debugging and MIR dumping concerns.
 
-#![expect(unused_imports, dead_code)]
-
 mod constraints;
 mod dump;
 pub(crate) mod legacy;
@@ -169,9 +167,7 @@ impl PoloniusContext {
         //let relevant_outlives_constraints =
         //    compute_relevant_outlives_constraints(tcx, regioncx, body, borrow_set, location_table);
 
-        #[expect(unused_mut)]
         let mut localized_outlives_constraints = LocalizedOutlivesConstraintSet::default();
-        /* Uncomment to activate old Polonius.
         convert_typeck_constraints(
             tcx,
             body,
@@ -201,7 +197,6 @@ impl PoloniusContext {
             &localized_outlives_constraints,
         );
         regioncx.record_live_loans(live_loans);
-        */
 
         regioncx.loans_out_of_scope_at_location =
             Some(the_great_solution::compute_loans_out_of_scope(
