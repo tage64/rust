@@ -424,7 +424,10 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                         reachable_by_loan: false,
                         added_to_stack: false,
                     });
-                if !(is_killed && location.is_predecessor_of(predecessor_location, self.body)) {
+                // To comply with previous Polonius, this if condition was:
+                // `!is_killed || !location.is_predecessor_of(predecessor_location)`
+                // But it doesn't seem to be needed to pass the tests.
+                if !is_killed {
                     self.remove_dead_regions(location, &mut backward_regions);
                     self.remove_dead_regions(predecessor_location, &mut backward_regions);
                     if let Some(time_travellers) = &time_travelling_regions.to_prev_stmt {
@@ -442,10 +445,10 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                     } else {
                         predecessor_node.added_regions = Some(backward_regions);
                     }
-                }
-                if !predecessor_node.added_to_stack {
-                    stack.push(predecessor_location);
-                    predecessor_node.added_to_stack = true;
+                    if !predecessor_node.added_to_stack {
+                        stack.push(predecessor_location);
+                        predecessor_node.added_to_stack = true;
+                    }
                 }
             } else {
                 for &predecessor_block in &self.body.basic_blocks.predecessors()[location.block] {
@@ -461,7 +464,7 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                             reachable_by_loan: false,
                             added_to_stack: false,
                         });
-                    if !(is_killed && location.is_predecessor_of(predecessor_location, self.body)) {
+                    if !is_killed {
                         self.remove_dead_regions(location, &mut backward_regions);
                         self.remove_dead_regions(predecessor_location, &mut backward_regions);
                         if let Some(time_travellers) = time_travelling_regions
@@ -487,10 +490,10 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                         } else {
                             predecessor_node.added_regions = Some(backward_regions);
                         }
-                    }
-                    if !predecessor_node.added_to_stack {
-                        stack.push(predecessor_location);
-                        predecessor_node.added_to_stack = true;
+                        if !predecessor_node.added_to_stack {
+                            stack.push(predecessor_location);
+                            predecessor_node.added_to_stack = true;
+                        }
                     }
                 }
             }
