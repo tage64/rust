@@ -3,7 +3,7 @@ use std::assert_matches::assert_matches;
 use std::mem;
 
 use rustc_data_structures::fx::{FxHashMap, FxHashSet, FxIndexMap};
-use rustc_index::bit_set::{DenseBitSet, SparseBitMatrix};
+use rustc_index::bit_set::thin_bit_set::{SparseBitMatrix, ThinBitSet};
 use rustc_index::{Idx, IndexVec};
 use rustc_middle::mir::{
     BasicBlock, Body, Location, Statement, StatementKind, Terminator, TerminatorKind,
@@ -117,9 +117,9 @@ enum TimeTravelKind {
 
 #[derive(Default)]
 pub(crate) struct TimeTravellingRegions {
-    pub to_prev_stmt: Option<DenseBitSet<RegionVid>>,
+    pub to_prev_stmt: Option<ThinBitSet<RegionVid>>,
     pub to_preceeding_blocks: Option<SparseBitMatrix<BasicBlock, RegionVid>>,
-    pub to_next_loc: Option<DenseBitSet<RegionVid>>,
+    pub to_next_loc: Option<ThinBitSet<RegionVid>>,
     pub to_succeeding_blocks: Option<SparseBitMatrix<BasicBlock, RegionVid>>,
 }
 
@@ -352,7 +352,7 @@ impl<'a, 'tcx> Constraints<'a, 'tcx> {
     pub(crate) fn add_dependent_regions_at_point(
         &self,
         point: PointIndex,
-        regions: &mut DenseBitSet<RegionVid>,
+        regions: &mut ThinBitSet<RegionVid>,
     ) -> TimeTravellingRegions {
         // This function will loop until there are no more regions to add. It will keep a set of
         // regions that has not been considered yet (the `to_check` variable). At each iteration of

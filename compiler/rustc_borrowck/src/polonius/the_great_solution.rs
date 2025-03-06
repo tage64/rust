@@ -5,7 +5,7 @@ use std::sync::LazyLock;
 
 use constraints::Constraints;
 use rustc_data_structures::fx::{FxHashMap, FxIndexMap};
-use rustc_index::bit_set::{DenseBitSet, SparseBitMatrix};
+use rustc_index::bit_set::thin_bit_set::{SparseBitMatrix, ThinBitSet};
 use rustc_index::{Idx, IndexVec};
 use rustc_middle::mir::{BasicBlock, Body, Location};
 use rustc_middle::ty::TyCtxt;
@@ -84,9 +84,9 @@ struct PoloniusOutOfScopePrecomputer<'a, 'tcx> {
     /// TODO: A map of all loan kills by their location. This should maybe be reworked.
     kills: BTreeMap<Location, BTreeSet<BorrowIndex>>,
     /// All regions that flows forward.
-    forward_regions: DenseBitSet<RegionVid>,
+    forward_regions: ThinBitSet<RegionVid>,
     /// All regions that flows backward.
-    backward_regions: DenseBitSet<RegionVid>,
+    backward_regions: ThinBitSet<RegionVid>,
 
     /// All outlives constraints.
     constraints: Constraints<'a, 'tcx>,
@@ -120,8 +120,8 @@ enum PoloniusBlock {
 }
 
 struct LoanRegionNode {
-    associated_regions: DenseBitSet<RegionVid>,
-    added_regions: Option<DenseBitSet<RegionVid>>,
+    associated_regions: ThinBitSet<RegionVid>,
+    added_regions: Option<ThinBitSet<RegionVid>>,
     reachable_by_loan: bool,
     added_to_stack: bool,
 }
@@ -501,7 +501,7 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
     }
 
     /// Remove dead regions from the set of associated regions.
-    fn remove_dead_regions(&self, location: Location, region_set: &mut DenseBitSet<RegionVid>) {
+    fn remove_dead_regions(&self, location: Location, region_set: &mut ThinBitSet<RegionVid>) {
         for region in region_set.clone().iter() {
             if !self.regioncx.liveness_constraints().is_live_at(region, location) {
                 region_set.remove(region);
@@ -548,8 +548,8 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
 }
 
 /// Create an empty bit set with capacity for all regions.
-fn new_empty_region_set(regioncx: &RegionInferenceContext<'_>) -> DenseBitSet<RegionVid> {
-    DenseBitSet::new_empty(regioncx.last_region_vid().map_or(0, |x| x.index() + 1))
+fn new_empty_region_set(regioncx: &RegionInferenceContext<'_>) -> ThinBitSet<RegionVid> {
+    ThinBitSet::new_empty(regioncx.last_region_vid().map_or(0, |x| x.index() + 1))
 }
 
 fn new_region_matrix<R: Idx>(
