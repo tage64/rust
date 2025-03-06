@@ -242,6 +242,9 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
             let Some(mut added_regions) = added_regions.take() else {
                 my_println!("Nothing new here.");
                 if reachable_by_loan {
+                    // FIXME: This is just a hack.
+                    let mut associated_regions = associated_regions.clone();
+                    self.remove_dead_regions(location, &mut associated_regions);
                     if associated_regions.is_empty() {
                         my_println!("  Loan killed.");
                         self.add_kill(loan_idx, location);
@@ -324,6 +327,16 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
             // Incorporate the added regions into `associated_regions`.
             associated_regions.union(&added_regions);
             my_println!("    Regions: {:?}", associated_regions);
+
+            // FIXME: This is just a hack.
+            {
+                let mut associated_regions = associated_regions.clone();
+                self.remove_dead_regions(location, &mut associated_regions);
+                if associated_regions.is_empty() {
+                    my_println!("  Loan killed.");
+                    self.add_kill(loan_idx, location);
+                }
+            }
 
             // Check if the loan is killed.
             let is_killed = self.kills.get(&location).is_some_and(|x| x.contains(&loan_idx));
