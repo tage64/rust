@@ -1,9 +1,12 @@
 #![allow(dead_code)]
+#![deny(unused_imports)]
 mod constraints;
+mod loan_invalidations;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::LazyLock;
 
 use constraints::Constraints;
+use loan_invalidations::compute_loan_invalidations;
 use rustc_data_structures::fx::{FxHashMap, FxIndexMap};
 use rustc_index::bit_set::thin_bit_set::{SparseBitMatrix, ThinBitSet};
 use rustc_index::{Idx, IndexVec};
@@ -56,7 +59,34 @@ pub(super) fn compute_loans_out_of_scope<'tcx>(
         live_region_variances,
     );
 
+    let loan_invalidations = compute_loan_invalidations(tcx, body, borrow_set);
+
     for borrow_idx in borrow_set.indices() {
+        let invalidation_locations = &loan_invalidations[borrow_idx];
+        if invalidation_locations.is_empty() {
+            if !body.local_decls[borrow_set[borrow_idx].borrowed_place.local]
+                .is_ref_to_thread_local()
+            {
+                my_println!("Loan {borrow_idx:?} is never invalidated.");
+                continue;
+            }
+        } else if loan_invalidations[borrow_idx].iter().all(|&invalidation_location| {
+            let mut associated_regions = new_empty_region_set(regioncx);
+            associated_regions.insert(borrow_set[borrow_idx].region);
+            polonius.constraints.add_dependent_regions(&mut associated_regions);
+            polonius.remove_dead_regions(invalidation_location, &mut associated_regions);
+            my_println!("Invalidated at {invalidation_location:?}");
+            if associated_regions.is_empty() {
+                polonius.add_kill(borrow_idx, invalidation_location);
+                true
+            } else {
+                false
+            }
+        }) {
+            my_println!("Loan {borrow_idx:?} is never invalidated.");
+            //continue;
+        }
+
         polonius.compute_loan_out_of_scope(borrow_idx);
     }
 
@@ -77,6 +107,7 @@ pub(super) fn compute_loans_out_of_scope<'tcx>(
                 .push(loan);
         }
     }
+    my_println!("Loans out of scope at location: {loans_out_of_scope_at_location:?}");
     loans_out_of_scope_at_location
 }
 

@@ -1,10 +1,9 @@
-#![allow(unused_imports)]
 use std::assert_matches::assert_matches;
 use std::mem;
 
-use rustc_data_structures::fx::{FxHashMap, FxHashSet, FxIndexMap};
+use rustc_data_structures::fx::FxHashSet;
+use rustc_index::IndexVec;
 use rustc_index::bit_set::thin_bit_set::{SparseBitMatrix, ThinBitSet};
-use rustc_index::{Idx, IndexVec};
 use rustc_middle::mir::{
     BasicBlock, Body, Location, Statement, StatementKind, Terminator, TerminatorKind,
 };
@@ -426,5 +425,54 @@ impl<'a, 'tcx> Constraints<'a, 'tcx> {
         }
 
         time_travelling_regions
+    }
+
+    /// Given a set of regions, add all regions induced by outlives constraints at any point in the
+    /// CFG to the set.
+    ///
+    /// If we have the set `{'a, 'b}`, and we have the following constraints:
+    /// - `'a: 'c`
+    /// - `'b: 'd`
+    /// - `'d: 'e`
+    /// Then `'c`, `'d` and `'e` will be added to the set.
+    pub(crate) fn add_dependent_regions(&self, regions: &mut ThinBitSet<RegionVid>) {
+        // This function will loop until there are no more regions to add. It will keep a set of
+        // regions that has not been considered yet (the `to_check` variable). At each iteration of
+        // the main loop, It'll walk through all constraints, both global and local. Any regions
+        // implied from the `to_check` set  will be put in the `to_check_next_round` set. When all
+        // constraints has been considered, the `to_check` set will be cleared. It will be swaped
+        // with the `to_check_next_round` set, and then the main loop runs again. It'll stop when
+        // there are no more regions to check.
+        //
+        // The time travelling constraints will not be treated differently in this function.
+
+        let mut to_check = regions.clone();
+        let mut to_check_next_round = new_empty_region_set(self.regioncx);
+
+        // Loop till the fixpoint: when there are no more regions to add.
+        while !to_check.is_empty() {
+            // Loop through all global constraints.
+            for constraint in &self.global_constraints {
+                if !to_check.contains(constraint.sup) {
+                    continue;
+                }
+                if regions.insert(constraint.sub) {
+                    to_check_next_round.insert(constraint.sub);
+                }
+            }
+
+            // Loop through all local constraints.
+            for constraint in self.local_constraints.iter().flatten() {
+                if !to_check.contains(constraint.sup) {
+                    continue;
+                }
+                if regions.insert(constraint.sub) {
+                    to_check_next_round.insert(constraint.sub);
+                }
+            }
+
+            mem::swap(&mut to_check, &mut to_check_next_round);
+            to_check_next_round.clear();
+        }
     }
 }
