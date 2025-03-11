@@ -54,6 +54,7 @@ pub(crate) mod the_great_solution;
 mod typeck_constraints;
 
 use std::collections::BTreeMap;
+use std::rc::Rc;
 
 use rustc_data_structures::fx::FxHashSet;
 use rustc_index::bit_set::SparseBitMatrix;
@@ -111,7 +112,7 @@ pub(crate) struct PoloniusDiagnosticsContext {
 /// The direction a constraint can flow into. Used to create liveness constraints according to
 /// variance.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
-enum ConstraintDirection {
+pub(crate) enum ConstraintDirection {
     /// For covariant cases, we add a forward edge `O at P1 -> O at P2`.
     Forward,
 
@@ -159,7 +160,7 @@ impl PoloniusContext {
         regioncx: &mut RegionInferenceContext<'tcx>,
         body: &Body<'tcx>,
         borrow_set: &BorrowSet<'tcx>,
-        location_map: &DenseLocationMap,
+        location_map: Rc<DenseLocationMap>,
     ) -> PoloniusDiagnosticsContext {
         let PoloniusLivenessContext { live_region_variances, boring_nll_locals } =
             self.liveness_context;
@@ -203,10 +204,12 @@ impl PoloniusContext {
                 tcx,
                 regioncx,
                 body,
-                location_map,
+                &location_map,
                 borrow_set,
                 &live_region_variances,
             ));
+        regioncx.location_map = Some(location_map);
+        regioncx.live_region_variances = Some(live_region_variances);
 
         PoloniusDiagnosticsContext { localized_outlives_constraints, boring_nll_locals }
     }

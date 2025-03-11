@@ -1,5 +1,5 @@
 #![expect(dead_code)]
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::rc::Rc;
 
 use rustc_data_structures::binary_search_util;
@@ -32,8 +32,8 @@ use crate::constraints::{ConstraintSccIndex, OutlivesConstraint, OutlivesConstra
 use crate::dataflow::BorrowIndex;
 use crate::diagnostics::{RegionErrorKind, RegionErrors, UniverseInfo};
 use crate::member_constraints::{MemberConstraintSet, NllMemberConstraintIndex};
-use crate::polonius::LiveLoans;
 use crate::polonius::legacy::PoloniusOutput;
+use crate::polonius::{ConstraintDirection, LiveLoans};
 use crate::region_infer::reverse_sccs::ReverseSccGraph;
 use crate::region_infer::values::{LivenessValues, RegionElement, RegionValues, ToElementIndex};
 use crate::type_check::free_region_relations::UniversalRegionRelations;
@@ -199,6 +199,10 @@ pub struct RegionInferenceContext<'tcx> {
 
     /// Information about when loans goes out of scope computed by Polonius.
     pub(crate) loans_out_of_scope_at_location: Option<FxIndexMap<Location, Vec<BorrowIndex>>>,
+
+    /// FIXME: Should these really go here?
+    pub(crate) location_map: Option<Rc<DenseLocationMap>>,
+    pub(crate) live_region_variances: Option<BTreeMap<RegionVid, ConstraintDirection>>,
 }
 
 /// Each time that `apply_member_constraint` is successful, it appends
@@ -468,6 +472,8 @@ impl<'tcx> RegionInferenceContext<'tcx> {
             type_tests,
             universal_region_relations,
             loans_out_of_scope_at_location: None,
+            location_map: None,
+            live_region_variances: None,
         };
 
         result.init_free_and_bound_regions();

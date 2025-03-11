@@ -10,13 +10,16 @@ use loan_invalidations::compute_loan_invalidations;
 use rustc_data_structures::fx::{FxHashMap, FxIndexMap};
 use rustc_index::bit_set::thin_bit_set::{SparseBitMatrix, ThinBitSet};
 use rustc_index::{Idx, IndexVec};
-use rustc_middle::mir::{BasicBlock, Body, Location};
+use rustc_middle::mir::{self, BasicBlock, Body, Location, Place, Statement, Terminator};
 use rustc_middle::ty::TyCtxt;
-use rustc_mir_dataflow::points::DenseLocationMap;
+use rustc_mir_dataflow::points::{DenseLocationMap, PointIndex};
 
 use super::ConstraintDirection;
 use super::loan_liveness::collect_kills;
-use crate::{BorrowIndex, BorrowSet, RegionInferenceContext, RegionVid};
+use crate::{
+    BorrowIndex, BorrowSet, PlaceConflictBias, PlaceExt, RegionInferenceContext, RegionVid,
+    places_conflict,
+};
 
 /// This toggles the `my_println!` and `my_print!` macros. Those macros are used here and there to
 /// print tracing information about Polonius.
@@ -77,7 +80,7 @@ pub(super) fn compute_loans_out_of_scope<'tcx>(
             polonius.remove_dead_regions(invalidation_location, &mut associated_regions);
             my_println!("Invalidated at {invalidation_location:?}");
             if associated_regions.is_empty() {
-                polonius.add_kill(borrow_idx, invalidation_location);
+                //polonius.add_kill(borrow_idx, invalidation_location);
                 true
             } else {
                 false
@@ -111,7 +114,7 @@ pub(super) fn compute_loans_out_of_scope<'tcx>(
     loans_out_of_scope_at_location
 }
 
-struct PoloniusOutOfScopePrecomputer<'a, 'tcx> {
+pub(crate) struct PoloniusOutOfScopePrecomputer<'a, 'tcx> {
     /// TODO: A map of all loan kills by their location. This should maybe be reworked.
     kills: BTreeMap<Location, BTreeSet<BorrowIndex>>,
     /// All regions that flows forward.
@@ -125,6 +128,8 @@ struct PoloniusOutOfScopePrecomputer<'a, 'tcx> {
     /// A mapping from locations in the CFG to a set of loans that go out of scope. This will be the
     /// final result of the computation.
     loans_out_of_scope: IndexVec<BorrowIndex, FxIndexMap<PoloniusBlock, BTreeSet<usize>>>,
+    /// A mapping from loans to sets of points where the loans are in scope.
+    loan_scopes: IndexVec<BorrowIndex, Option<ThinBitSet<PointIndex>>>,
 
     tcx: TyCtxt<'tcx>,
     regioncx: &'a RegionInferenceContext<'tcx>,
@@ -153,12 +158,19 @@ enum PoloniusBlock {
 struct LoanRegionNode {
     associated_regions: ThinBitSet<RegionVid>,
     added_regions: Option<ThinBitSet<RegionVid>>,
+    /// Whether this location is reachable by forward edges from the loan's introduction point in
+    /// the localized constraint graph.
     reachable_by_loan: bool,
+    /// Whether the loan is in scope.
+    ///
+    /// It not possible for a loan to be in scope unless `reachable_by_loan` is true.
+    in_scope: bool,
+    /// Whether this node has been added to the stack for processing.
     added_to_stack: bool,
 }
 
 impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
-    fn new(
+    pub(crate) fn new(
         tcx: TyCtxt<'tcx>,
         regioncx: &'a RegionInferenceContext<'tcx>,
         body: &'a Body<'tcx>,
@@ -218,6 +230,7 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
 
         Self {
             loans_out_of_scope: IndexVec::from_fn_n(|_| Default::default(), borrow_set.len()),
+            loan_scopes: IndexVec::from_elem_n(None, borrow_set.len()),
             constraints,
             kills,
             forward_regions,
@@ -230,9 +243,22 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
         }
     }
 
-    fn compute_loan_out_of_scope(&mut self, loan_idx: BorrowIndex) {
+    /// Check if a loan is in scope at a location.
+    pub(crate) fn loan_in_scope_at(&mut self, borrow_idx: BorrowIndex, location: Location) -> bool {
+        let point = self.location_map.point_from_location(location);
+        if let Some(in_scope_points) = &self.loan_scopes[borrow_idx] {
+            in_scope_points
+        } else {
+            let in_scope_points = self.compute_loan_out_of_scope(borrow_idx);
+            self.loan_scopes[borrow_idx].insert(in_scope_points)
+        }
+        .contains(point)
+    }
+
+    fn compute_loan_out_of_scope(&mut self, loan_idx: BorrowIndex) -> ThinBitSet<PointIndex> {
         my_println!("- Loan {:?}", loan_idx);
         let loan_data = &self.borrow_set[loan_idx];
+        let mut in_scope_points = ThinBitSet::new_empty(self.location_map.num_points());
 
         // Put the loan's initial region in a set.
         let mut initial_region_set = new_empty_region_set(self.regioncx);
@@ -240,15 +266,20 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
 
         let mut nodes = FxHashMap::default();
         let mut stack = Vec::new();
-        nodes.insert(loan_data.reserve_location, LoanRegionNode {
-            associated_regions: new_empty_region_set(self.regioncx),
-            added_regions: Some(initial_region_set),
-            reachable_by_loan: true,
-            added_to_stack: true,
-        });
+        nodes.insert(
+            loan_data.reserve_location,
+            LoanRegionNode {
+                associated_regions: new_empty_region_set(self.regioncx),
+                added_regions: Some(initial_region_set),
+                reachable_by_loan: true,
+                in_scope: false,
+                added_to_stack: true,
+            },
+        );
         stack.push(loan_data.reserve_location);
 
         while let Some(location) = stack.pop() {
+            let point = self.location_map.point_from_location(location);
             let block_data = &self.body[location.block];
 
             // Debugging: Print the current location and statement/expression.
@@ -263,9 +294,11 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                 associated_regions,
                 added_regions,
                 reachable_by_loan,
+                in_scope,
                 added_to_stack,
             } = nodes.get_mut(&location).unwrap();
             let reachable_by_loan = *reachable_by_loan; // Make copy.
+            let in_scope = *in_scope; // Make copy.
 
             debug_assert!(*added_to_stack);
             *added_to_stack = false;
@@ -282,8 +315,11 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                     } else {
                         // Propagate reachability to succeeding nodes.
                         // TODO: Check if this is really the best approach.
+                        // TODO: Should we also propagate in_scope?
                         if location.statement_index < block_data.statements.len() {
                             let successor_location = location.successor_within_block();
+                            let successor_point =
+                                self.location_map.point_from_location(successor_location);
                             let LoanRegionNode {
                                 reachable_by_loan: succ_reachable,
                                 added_to_stack,
@@ -298,11 +334,15 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                                     stack.push(successor_location);
                                     *added_to_stack = true;
                                 }
+                                in_scope_points.insert(successor_point);
+                                my_println!("    In scope at {successor_location:?}");
                             }
                         } else {
                             for successor_block in block_data.terminator().successors() {
                                 let successor_location =
                                     Location { block: successor_block, statement_index: 0 };
+                                let successor_point =
+                                    self.location_map.entry_point(successor_block);
                                 let LoanRegionNode {
                                     reachable_by_loan: succ_reachable,
                                     added_to_stack,
@@ -317,6 +357,8 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                                         stack.push(successor_location);
                                         *added_to_stack = true;
                                     }
+                                    in_scope_points.insert(successor_point);
+                                    my_println!("    In scope at {successor_location:?}");
                                 }
                             }
                         }
@@ -332,10 +374,8 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
             );
 
             // Add constraints.
-            let time_travelling_regions = self.constraints.add_dependent_regions_at_point(
-                self.location_map.point_from_location(location),
-                &mut added_regions,
-            );
+            let time_travelling_regions =
+                self.constraints.add_dependent_regions_at_point(point, &mut added_regions);
             if let Some(tf) = &time_travelling_regions.to_next_loc {
                 my_println!("    Forward time travellers: {:?}", tf);
             }
@@ -366,6 +406,9 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                 if associated_regions.is_empty() {
                     my_println!("  Loan killed.");
                     self.add_kill(loan_idx, location);
+                } else if in_scope {
+                    in_scope_points.insert(point);
+                    my_println!("    In scope at {location:?}");
                 }
             }
 
@@ -384,7 +427,8 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                     nodes.entry(successor_location).or_insert_with(|| LoanRegionNode {
                         associated_regions: new_empty_region_set(self.regioncx),
                         added_regions: None,
-                        reachable_by_loan,
+                        reachable_by_loan: false,
+                        in_scope: false,
                         added_to_stack: false,
                     });
                 if !is_killed {
@@ -406,6 +450,9 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                     }
                 }
                 successor_node.reachable_by_loan |= reachable_by_loan;
+                successor_node.in_scope |= in_scope;
+                // FIXME: Only necessary if we track when loans goes out of scope rather than when
+                // they are in scope.
                 if !successor_node.added_to_stack {
                     stack.push(successor_location);
                     successor_node.added_to_stack = true;
@@ -419,7 +466,8 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                         nodes.entry(successor_location).or_insert_with(|| LoanRegionNode {
                             associated_regions: new_empty_region_set(self.regioncx),
                             added_regions: None,
-                            reachable_by_loan,
+                            reachable_by_loan: false,
+                            in_scope: false,
                             added_to_stack: false,
                         });
                     if !is_killed {
@@ -450,6 +498,7 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                         }
                     }
                     successor_node.reachable_by_loan |= reachable_by_loan;
+                    successor_node.in_scope |= in_scope;
                     if !successor_node.added_to_stack {
                         stack.push(successor_location);
                         successor_node.added_to_stack = true;
@@ -466,6 +515,7 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                         associated_regions: new_empty_region_set(self.regioncx),
                         added_regions: None,
                         reachable_by_loan: false,
+                        in_scope: false,
                         added_to_stack: false,
                     });
                 // To comply with previous Polonius, this if condition was:
@@ -506,6 +556,7 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                             associated_regions: new_empty_region_set(self.regioncx),
                             added_regions: None,
                             reachable_by_loan: false,
+                            in_scope: false,
                             added_to_stack: false,
                         });
                     if !is_killed {
@@ -542,6 +593,8 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                 }
             }
         }
+
+        in_scope_points
     }
 
     /// Remove dead regions from the set of associated regions.
@@ -588,6 +641,94 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
         if let Some(statement_indices) = self.loans_out_of_scope[loan_idx].get_mut(&block) {
             statement_indices.remove(&location.statement_index);
         }
+    }
+
+    /// Given the `in_scope` value for a location, return the `in_scope` value for the successor
+    /// location(s).
+    fn in_scope_for_successor(
+        &self,
+        borrow_idx: BorrowIndex,
+        location: Location,
+        current_in_scope: bool,
+    ) -> bool {
+        if let Some(stmt) = self.body[location.block].statements.get(location.statement_index) {
+            let current_in_scope =
+                current_in_scope || self.in_scope_at_stmt(borrow_idx, stmt, location);
+            current_in_scope && !self.out_of_scope_at_stmt(borrow_idx, stmt)
+        } else {
+            current_in_scope
+                && !self
+                    .out_of_scope_at_terminator(borrow_idx, &self.body[location.block].terminator())
+        }
+    }
+
+    /// Check if a borrow is in scope after this statement, regardless if it was in scope on entry.
+    #[inline]
+    fn in_scope_at_stmt(
+        &self,
+        borrow_idx: BorrowIndex,
+        stmt: &Statement<'tcx>,
+        location: Location,
+    ) -> bool {
+        if let mir::StatementKind::Assign(box (_lhs, mir::Rvalue::Ref(_, _, place))) = &stmt.kind {
+            borrow_idx == self.borrow_set.get_index_of(&location).unwrap()
+                && !place.ignore_borrow(self.tcx, self.body, &self.borrow_set.locals_state_at_exit)
+        } else {
+            false
+        }
+    }
+
+    /// Given that the borrow was in scope on entry to this statement, check if it goes out of scope
+    /// till the next location.
+    #[inline]
+    fn out_of_scope_at_stmt(&self, borrow_idx: BorrowIndex, stmt: &Statement<'tcx>) -> bool {
+        match &stmt.kind {
+            mir::StatementKind::Assign(box (lhs, _rhs)) => {
+                self.borrow_out_of_scope_on_place(borrow_idx, *lhs)
+            }
+            mir::StatementKind::StorageDead(local) => {
+                self.borrow_out_of_scope_on_place(borrow_idx, Place::from(*local))
+            }
+            _ => false,
+        }
+    }
+
+    /// Given that the borrow was in scope on entry to this terminator, check if it goes out of scope
+    /// till the succeeding blocks.
+    #[inline]
+    fn out_of_scope_at_terminator(
+        &self,
+        borrow_idx: BorrowIndex,
+        terminator: &Terminator<'tcx>,
+    ) -> bool {
+        if let mir::TerminatorKind::InlineAsm { operands, .. } = &terminator.kind {
+            operands.iter().any(|op| {
+                if let mir::InlineAsmOperand::Out { place: Some(place), .. }
+                | mir::InlineAsmOperand::InOut { out_place: Some(place), .. } = op
+                {
+                    self.borrow_out_of_scope_on_place(borrow_idx, *place)
+                } else {
+                    false
+                }
+            })
+        } else {
+            false
+        }
+    }
+
+    fn borrow_out_of_scope_on_place(&self, borrow_idx: BorrowIndex, place: Place<'tcx>) -> bool {
+        self.borrow_set.local_map.get(&place.local).is_some_and(|bs| bs.contains(&borrow_idx))
+            && if place.projection.is_empty() {
+                !self.body.local_decls[place.local].is_ref_to_static()
+            } else {
+                places_conflict(
+                    self.tcx,
+                    self.body,
+                    self.borrow_set[borrow_idx].borrowed_place,
+                    place,
+                    PlaceConflictBias::NoOverlap,
+                )
+            }
     }
 }
 
