@@ -247,6 +247,8 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
     pub(crate) fn loan_in_scope_at(&mut self, borrow_idx: BorrowIndex, location: Location) -> bool {
         let borrow = &self.borrow_set[borrow_idx];
 
+        // Check if this borrow is ignored.
+        // FIXME: Maybe we should cache this information.
         if borrow.borrowed_place().ignore_borrow(
             self.tcx,
             self.body,
@@ -255,6 +257,7 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
             return false;
         }
 
+        // Check if this location can never be reached by the borrow.
         if !borrow.reserve_location.successor_within_block().is_predecessor_of(location, self.body)
         {
             return false;
@@ -353,6 +356,7 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                 Some(time_travelling_regions)
             } else {
                 my_println!("Nothing new here.");
+                // FIXME: This should be unnecessary if we don't track kills.
                 if reachable_by_loan {
                     // FIXME: This is just a hack.
                     let mut associated_regions = associated_regions.clone();
