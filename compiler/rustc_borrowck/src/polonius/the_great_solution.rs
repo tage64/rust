@@ -641,6 +641,13 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
         location: Location,
         current_in_scope: bool,
     ) -> bool {
+        assert_eq!(
+            location == self.borrow_set[borrow_idx].reserve_location,
+            self.body[location.block]
+                .statements
+                .get(location.statement_index)
+                .is_some_and(|stmt| self.in_scope_at_stmt(borrow_idx, stmt, location))
+        );
         if let Some(stmt) = self.body[location.block].statements.get(location.statement_index) {
             let current_in_scope =
                 current_in_scope || self.in_scope_at_stmt(borrow_idx, stmt, location);
