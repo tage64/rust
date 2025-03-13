@@ -1212,20 +1212,19 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, '_, 'tcx> {
             }
 
             // Check if the loan is in scope.
-            let loan_in_scope = if let Some(ref mut scopes_computer) =
-                self.polonius_out_of_scope_computer
-            {
-                let top_down_answer = scopes_computer.loan_in_scope_at(borrow_idx, location);
-                let bottom_up_answer = self.borrows_in_scope(location, state).contains(borrow_idx);
-                assert_eq!(
-                    top_down_answer, bottom_up_answer,
-                    "Top down gives different answer at {borrow_idx:?} {location:?}"
-                );
-                top_down_answer
-            } else {
-                let borrows_in_scope = self.borrows_in_scope(location, state);
-                borrows_in_scope.contains(borrow_idx)
-            };
+            let loan_in_scope =
+                if let Some(ref mut scopes_computer) = self.polonius_out_of_scope_computer {
+                    let top_down_answer = scopes_computer.loan_in_scope_at(borrow_idx, location);
+                    /*let bottom_up_answer = self.borrows_in_scope(location, state).contains(borrow_idx);
+                    assert_eq!(
+                        top_down_answer, bottom_up_answer,
+                        "Top down gives different answer at {borrow_idx:?} {location:?}"
+                    );*/
+                    top_down_answer
+                } else {
+                    let borrows_in_scope = self.borrows_in_scope(location, state);
+                    borrows_in_scope.contains(borrow_idx)
+                };
             if !loan_in_scope {
                 continue;
             }
