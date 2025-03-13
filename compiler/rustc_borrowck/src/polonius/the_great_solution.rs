@@ -303,7 +303,53 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
             debug_assert!(*added_to_stack);
             *added_to_stack = false;
 
-            let Some(mut added_regions) = added_regions.take() else {
+            let time_travelling_regions = if let Some(mut added_regions) = added_regions.take() {
+                debug_assert!(!added_regions.is_empty(), "added_regions should never be empty.");
+                debug_assert!(
+                    added_regions.iter().all(|r| !associated_regions.contains(r)),
+                    "added_regions and associated_regions should be disjunct."
+                );
+
+                // Add constraints.
+                let time_travelling_regions =
+                    self.constraints.add_dependent_regions_at_point(point, &mut added_regions);
+                if let Some(tf) = &time_travelling_regions.to_next_loc {
+                    my_println!("    Forward time travellers: {:?}", tf);
+                }
+                if let Some(tf) = &time_travelling_regions.to_prev_stmt {
+                    my_println!("    Backward time travellers: {:?}", tf);
+                }
+                if let Some(x) = &time_travelling_regions.to_preceeding_blocks {
+                    my_println!("    To preceeding blocks: {:?}", x);
+                }
+                if let Some(x) = &time_travelling_regions.to_succeeding_blocks {
+                    my_println!("    To succeeding blocks: {:?}", x);
+                }
+
+                // TODO: Look if this is necessary
+                if associated_regions.is_empty() {
+                    self.remove_kill(loan_idx, location);
+                }
+
+                // Incorporate the added regions into `associated_regions`.
+                associated_regions.union(&added_regions);
+                my_println!("    Regions: {:?}", associated_regions);
+
+                // FIXME: This is just a hack.
+                {
+                    let mut associated_regions = associated_regions.clone();
+                    self.remove_dead_regions(location, &mut associated_regions);
+                    if associated_regions.is_empty() {
+                        my_println!("  Loan killed.");
+                        self.add_kill(loan_idx, location);
+                    } else if in_scope {
+                        in_scope_points.insert(point);
+                        my_println!("    In scope at {location:?}");
+                    }
+                }
+
+                Some(time_travelling_regions)
+            } else {
                 my_println!("Nothing new here.");
                 if reachable_by_loan {
                     // FIXME: This is just a hack.
@@ -312,108 +358,20 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                     if associated_regions.is_empty() {
                         my_println!("  Loan killed.");
                         self.add_kill(loan_idx, location);
-                    } else {
-                        // Propagate reachability to succeeding nodes.
-                        // TODO: Check if this is really the best approach.
-                        // TODO: Should we also propagate in_scope?
-                        if location.statement_index < block_data.statements.len() {
-                            let successor_location = location.successor_within_block();
-                            let successor_point =
-                                self.location_map.point_from_location(successor_location);
-                            let LoanRegionNode {
-                                reachable_by_loan: succ_reachable,
-                                added_to_stack,
-                                ..
-                            } = nodes.get_mut(&location.successor_within_block()).unwrap();
-                            if !*succ_reachable {
-                                my_println!(
-                                    "    Propagating reachability to {successor_location:?}."
-                                );
-                                *succ_reachable = true;
-                                if !*added_to_stack {
-                                    stack.push(successor_location);
-                                    *added_to_stack = true;
-                                }
-                                in_scope_points.insert(successor_point);
-                                my_println!("    In scope at {successor_location:?}");
-                            }
-                        } else {
-                            for successor_block in block_data.terminator().successors() {
-                                let successor_location =
-                                    Location { block: successor_block, statement_index: 0 };
-                                let successor_point =
-                                    self.location_map.entry_point(successor_block);
-                                let LoanRegionNode {
-                                    reachable_by_loan: succ_reachable,
-                                    added_to_stack,
-                                    ..
-                                } = nodes.get_mut(&successor_location).unwrap();
-                                if !*succ_reachable {
-                                    my_println!(
-                                        "    Propagating reachability to {successor_location:?}."
-                                    );
-                                    *succ_reachable = true;
-                                    if !*added_to_stack {
-                                        stack.push(successor_location);
-                                        *added_to_stack = true;
-                                    }
-                                    in_scope_points.insert(successor_point);
-                                    my_println!("    In scope at {successor_location:?}");
-                                }
-                            }
-                        }
+                        continue;
                     }
+                } else {
+                    debug_assert!(!in_scope, "If it's not reachable then it's not in scope.");
+                    continue;
                 }
-                continue;
+                None
             };
-
-            debug_assert!(!added_regions.is_empty(), "added_regions should never be empty.");
-            debug_assert!(
-                added_regions.iter().all(|r| !associated_regions.contains(r)),
-                "added_regions and associated_regions should be disjunct."
-            );
-
-            // Add constraints.
-            let time_travelling_regions =
-                self.constraints.add_dependent_regions_at_point(point, &mut added_regions);
-            if let Some(tf) = &time_travelling_regions.to_next_loc {
-                my_println!("    Forward time travellers: {:?}", tf);
-            }
-            if let Some(tf) = &time_travelling_regions.to_prev_stmt {
-                my_println!("    Backward time travellers: {:?}", tf);
-            }
-            if let Some(x) = &time_travelling_regions.to_preceeding_blocks {
-                my_println!("    To preceeding blocks: {:?}", x);
-            }
-            if let Some(x) = &time_travelling_regions.to_succeeding_blocks {
-                my_println!("    To succeeding blocks: {:?}", x);
-            }
-
-            // TODO: Look if this is necessary
-            if associated_regions.is_empty() {
-                debug_assert!(!added_regions.is_empty());
-                self.remove_kill(loan_idx, location);
-            }
-
-            // Incorporate the added regions into `associated_regions`.
-            associated_regions.union(&added_regions);
-            my_println!("    Regions: {:?}", associated_regions);
-
-            // FIXME: This is just a hack.
-            {
-                let mut associated_regions = associated_regions.clone();
-                self.remove_dead_regions(location, &mut associated_regions);
-                if associated_regions.is_empty() {
-                    my_println!("  Loan killed.");
-                    self.add_kill(loan_idx, location);
-                } else if in_scope {
-                    in_scope_points.insert(point);
-                    my_println!("    In scope at {location:?}");
-                }
-            }
 
             // Check if the loan is killed.
             let is_killed = self.kills.get(&location).is_some_and(|x| x.contains(&loan_idx));
+
+            // Update in_scope.
+            let successor_in_scope = self.successor_in_scope(loan_idx, location, in_scope);
 
             // Make copies of `associated_regions` as that borrow will be killed soon.
             let mut forward_regions = associated_regions.clone();
@@ -434,13 +392,16 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                 if !is_killed {
                     self.remove_dead_regions(location, &mut forward_regions);
                     self.remove_dead_regions(successor_location, &mut forward_regions);
-                    if let Some(time_travellers) = &time_travelling_regions.to_next_loc {
-                        forward_regions.union(time_travellers);
+                    if let Some(tr) = &time_travelling_regions {
+                        if let Some(time_travellers) = &tr.to_next_loc {
+                            forward_regions.union(time_travellers);
+                        }
                     }
                     forward_regions.subtract(&successor_node.associated_regions);
                 } else {
                     forward_regions.clear();
                 }
+                let mut successor_has_changed = false;
                 if !forward_regions.is_empty() {
                     my_println!("    Found forward regions: {:?}", forward_regions);
                     if let Some(added_regions) = successor_node.added_regions.as_mut() {
@@ -448,12 +409,22 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                     } else {
                         successor_node.added_regions = Some(forward_regions);
                     }
+                    successor_has_changed = true;
                 }
-                successor_node.reachable_by_loan |= reachable_by_loan;
-                successor_node.in_scope |= in_scope;
-                // FIXME: Only necessary if we track when loans goes out of scope rather than when
-                // they are in scope.
-                if !successor_node.added_to_stack {
+                if reachable_by_loan && !successor_node.reachable_by_loan {
+                    successor_node.reachable_by_loan = reachable_by_loan;
+                    successor_has_changed = true;
+                }
+                if successor_in_scope && !successor_node.in_scope {
+                    successor_node.in_scope = successor_in_scope;
+                    successor_has_changed = true;
+                }
+                // FIXME: Only necessary if we record the kills of loans.
+                if successor_node.associated_regions.is_empty() {
+                    successor_has_changed = true;
+                    // That node is killed.
+                }
+                if successor_has_changed && !successor_node.added_to_stack {
                     stack.push(successor_location);
                     successor_node.added_to_stack = true;
                 }
@@ -473,18 +444,21 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                     if !is_killed {
                         self.remove_dead_regions(location, &mut forward_regions);
                         self.remove_dead_regions(successor_location, &mut forward_regions);
-                        if let Some(time_travellers) = time_travelling_regions
-                            .to_succeeding_blocks
-                            .as_ref()
-                            .and_then(|x| x.row(successor_block))
-                        {
-                            forward_regions.union(time_travellers);
+                        if let Some(tr) = &time_travelling_regions {
+                            if let Some(time_travellers) = tr
+                                .to_succeeding_blocks
+                                .as_ref()
+                                .and_then(|x| x.row(successor_block))
+                            {
+                                forward_regions.union(time_travellers);
+                            }
                         }
                         forward_regions.subtract(&successor_node.associated_regions);
                     } else {
                         forward_regions.clear();
                     }
 
+                    let mut successor_has_changed = false;
                     if !forward_regions.is_empty() {
                         my_println!(
                             "    Found forward regions to {:?}: {:?}",
@@ -496,10 +470,22 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                         } else {
                             successor_node.added_regions = Some(forward_regions);
                         }
+                        successor_has_changed = true;
                     }
-                    successor_node.reachable_by_loan |= reachable_by_loan;
-                    successor_node.in_scope |= in_scope;
-                    if !successor_node.added_to_stack {
+                    if reachable_by_loan && !successor_node.reachable_by_loan {
+                        successor_node.reachable_by_loan = reachable_by_loan;
+                        successor_has_changed = true;
+                    }
+                    if successor_in_scope && !successor_node.in_scope {
+                        successor_node.in_scope = successor_in_scope;
+                        successor_has_changed = true;
+                    }
+                    // FIXME: Only necessary if we record the kills of loans.
+                    if successor_node.associated_regions.is_empty() {
+                        successor_has_changed = true;
+                        // That node is killed.
+                    }
+                    if successor_has_changed && !successor_node.added_to_stack {
                         stack.push(successor_location);
                         successor_node.added_to_stack = true;
                     }
@@ -524,8 +510,10 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                 if !is_killed {
                     self.remove_dead_regions(location, &mut backward_regions);
                     self.remove_dead_regions(predecessor_location, &mut backward_regions);
-                    if let Some(time_travellers) = &time_travelling_regions.to_prev_stmt {
-                        backward_regions.union(time_travellers);
+                    if let Some(tr) = &time_travelling_regions {
+                        if let Some(time_travellers) = &tr.to_prev_stmt {
+                            backward_regions.union(time_travellers);
+                        }
                     }
                     backward_regions.subtract(&predecessor_node.associated_regions);
                 } else {
@@ -562,12 +550,14 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                     if !is_killed {
                         self.remove_dead_regions(location, &mut backward_regions);
                         self.remove_dead_regions(predecessor_location, &mut backward_regions);
-                        if let Some(time_travellers) = time_travelling_regions
-                            .to_preceeding_blocks
-                            .as_ref()
-                            .and_then(|x| x.row(predecessor_block))
-                        {
-                            backward_regions.union(time_travellers);
+                        if let Some(tr) = &time_travelling_regions {
+                            if let Some(time_travellers) = tr
+                                .to_preceeding_blocks
+                                .as_ref()
+                                .and_then(|x| x.row(predecessor_block))
+                            {
+                                backward_regions.union(time_travellers);
+                            }
                         }
                         backward_regions.subtract(&predecessor_node.associated_regions);
                     } else {
@@ -645,7 +635,7 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
 
     /// Given the `in_scope` value for a location, return the `in_scope` value for the successor
     /// location(s).
-    fn in_scope_for_successor(
+    fn successor_in_scope(
         &self,
         borrow_idx: BorrowIndex,
         location: Location,
@@ -671,8 +661,8 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
         location: Location,
     ) -> bool {
         if let mir::StatementKind::Assign(box (_lhs, mir::Rvalue::Ref(_, _, place))) = &stmt.kind {
-            borrow_idx == self.borrow_set.get_index_of(&location).unwrap()
-                && !place.ignore_borrow(self.tcx, self.body, &self.borrow_set.locals_state_at_exit)
+            !place.ignore_borrow(self.tcx, self.body, &self.borrow_set.locals_state_at_exit)
+                && borrow_idx == self.borrow_set.get_index_of(&location).unwrap()
         } else {
             false
         }
