@@ -1214,7 +1214,6 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, '_, 'tcx> {
             // Check if the loan is in scope.
             let loan_in_scope = if let Some(ref mut scopes_computer) =
                 self.polonius_out_of_scope_computer
-                && false
             {
                 let top_down_answer = scopes_computer.loan_in_scope_at(borrow_idx, location);
                 let bottom_up_answer = self.borrows_in_scope(location, state).contains(borrow_idx);

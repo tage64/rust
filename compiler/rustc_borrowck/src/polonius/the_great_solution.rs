@@ -335,19 +335,6 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                 associated_regions.union(&added_regions);
                 my_println!("    Regions: {:?}", associated_regions);
 
-                // FIXME: This is just a hack.
-                {
-                    let mut associated_regions = associated_regions.clone();
-                    self.remove_dead_regions(location, &mut associated_regions);
-                    if associated_regions.is_empty() {
-                        my_println!("  Loan killed.");
-                        self.add_kill(loan_idx, location);
-                    } else if in_scope {
-                        in_scope_points.insert(point);
-                        my_println!("    In scope at {location:?}");
-                    }
-                }
-
                 Some(time_travelling_regions)
             } else {
                 my_println!("Nothing new here.");
@@ -366,6 +353,19 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                 }
                 None
             };
+
+            // FIXME: This is just a hack.
+            {
+                let mut associated_regions = associated_regions.clone();
+                self.remove_dead_regions(location, &mut associated_regions);
+                if associated_regions.is_empty() {
+                    my_println!("  Loan killed.");
+                    self.add_kill(loan_idx, location);
+                } else if in_scope {
+                    in_scope_points.insert(point);
+                    my_println!("    In scope at {location:?}");
+                }
+            }
 
             // Check if the loan is killed.
             let is_killed = self.kills.get(&location).is_some_and(|x| x.contains(&loan_idx));
