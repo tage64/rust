@@ -245,6 +245,21 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
 
     /// Check if a loan is in scope at a location.
     pub(crate) fn loan_in_scope_at(&mut self, borrow_idx: BorrowIndex, location: Location) -> bool {
+        let borrow = &self.borrow_set[borrow_idx];
+
+        if borrow.borrowed_place().ignore_borrow(
+            self.tcx,
+            self.body,
+            &self.borrow_set.locals_state_at_exit,
+        ) {
+            return false;
+        }
+
+        if !borrow.reserve_location.successor_within_block().is_predecessor_of(location, self.body)
+        {
+            return false;
+        }
+
         let point = self.location_map.point_from_location(location);
         if let Some(in_scope_points) = &self.loan_scopes[borrow_idx] {
             in_scope_points
@@ -641,37 +656,16 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
         location: Location,
         current_in_scope: bool,
     ) -> bool {
-        assert_eq!(
-            location == self.borrow_set[borrow_idx].reserve_location,
-            self.body[location.block]
-                .statements
-                .get(location.statement_index)
-                .is_some_and(|stmt| self.in_scope_at_stmt(borrow_idx, stmt, location))
-        );
-        if let Some(stmt) = self.body[location.block].statements.get(location.statement_index) {
-            let current_in_scope =
-                current_in_scope || self.in_scope_at_stmt(borrow_idx, stmt, location);
+        if location == self.borrow_set[borrow_idx].reserve_location {
+            true
+        } else if let Some(stmt) =
+            self.body[location.block].statements.get(location.statement_index)
+        {
             current_in_scope && !self.out_of_scope_at_stmt(borrow_idx, stmt)
         } else {
             current_in_scope
                 && !self
                     .out_of_scope_at_terminator(borrow_idx, &self.body[location.block].terminator())
-        }
-    }
-
-    /// Check if a borrow is in scope after this statement, regardless if it was in scope on entry.
-    #[inline]
-    fn in_scope_at_stmt(
-        &self,
-        borrow_idx: BorrowIndex,
-        stmt: &Statement<'tcx>,
-        location: Location,
-    ) -> bool {
-        if let mir::StatementKind::Assign(box (_lhs, mir::Rvalue::Ref(_, _, place))) = &stmt.kind {
-            !place.ignore_borrow(self.tcx, self.body, &self.borrow_set.locals_state_at_exit)
-                && borrow_idx == self.borrow_set.get_index_of(&location).unwrap()
-        } else {
-            false
         }
     }
 
