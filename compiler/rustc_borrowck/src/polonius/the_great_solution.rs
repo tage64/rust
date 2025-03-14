@@ -6,8 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::LazyLock;
 
 use constraints::Constraints;
-use loan_invalidations::compute_loan_invalidations;
-use rustc_data_structures::fx::{FxHashMap, FxIndexMap};
+use rustc_data_structures::fx::FxHashMap;
 use rustc_index::bit_set::thin_bit_set::{SparseBitMatrix, ThinBitSet};
 use rustc_index::{Idx, IndexVec};
 use rustc_middle::mir::{self, BasicBlock, Body, Location, Place, Statement, Terminator};
@@ -45,75 +44,6 @@ macro_rules! my_print {
 }
 pub(crate) use my_print;
 
-pub(super) fn compute_loans_out_of_scope<'tcx>(
-    tcx: TyCtxt<'tcx>,
-    regioncx: &RegionInferenceContext<'tcx>,
-    body: &Body<'tcx>,
-    location_map: &DenseLocationMap,
-    borrow_set: &BorrowSet<'tcx>,
-    live_region_variances: &BTreeMap<RegionVid, ConstraintDirection>,
-) -> FxIndexMap<Location, Vec<BorrowIndex>> {
-    let mut polonius = PoloniusOutOfScopePrecomputer::new(
-        tcx,
-        regioncx,
-        body,
-        location_map,
-        borrow_set,
-        live_region_variances,
-    );
-
-    let loan_invalidations = compute_loan_invalidations(tcx, body, borrow_set);
-
-    for borrow_idx in borrow_set.indices() {
-        let invalidation_locations = &loan_invalidations[borrow_idx];
-        if invalidation_locations.is_empty() {
-            if !body.local_decls[borrow_set[borrow_idx].borrowed_place.local]
-                .is_ref_to_thread_local()
-            {
-                my_println!("Loan {borrow_idx:?} is never invalidated.");
-                continue;
-            }
-        } else if loan_invalidations[borrow_idx].iter().all(|&invalidation_location| {
-            let mut associated_regions = new_empty_region_set(regioncx);
-            associated_regions.insert(borrow_set[borrow_idx].region);
-            polonius.constraints.add_dependent_regions(&mut associated_regions);
-            polonius.remove_dead_regions(invalidation_location, &mut associated_regions);
-            my_println!("Invalidated at {invalidation_location:?}");
-            if associated_regions.is_empty() {
-                //polonius.add_kill(borrow_idx, invalidation_location);
-                true
-            } else {
-                false
-            }
-        }) {
-            my_println!("Loan {borrow_idx:?} is never invalidated.");
-            //continue;
-        }
-
-        polonius.compute_loan_out_of_scope(borrow_idx);
-    }
-
-    let mut loans_out_of_scope_at_location = FxIndexMap::<_, Vec<_>>::default();
-    for (loan, deaths) in polonius.loans_out_of_scope.into_iter_enumerated() {
-        for (polonius_block, statement_indices) in deaths {
-            let block = match polonius_block {
-                PoloniusBlock::Normal(b) => b,
-                PoloniusBlock::BeforeReserveLocation => borrow_set[loan].reserve_location.block,
-            };
-            let Some(statement_index) = statement_indices.first().copied() else {
-                continue;
-            };
-
-            loans_out_of_scope_at_location
-                .entry(Location { block, statement_index })
-                .or_default()
-                .push(loan);
-        }
-    }
-    my_println!("Loans out of scope at location: {loans_out_of_scope_at_location:?}");
-    loans_out_of_scope_at_location
-}
-
 pub(crate) struct PoloniusOutOfScopePrecomputer<'a, 'tcx> {
     /// A set of the loans that has been checked.
     checked_loans: ThinBitSet<BorrowIndex>,
@@ -138,9 +68,6 @@ pub(crate) struct PoloniusOutOfScopePrecomputer<'a, 'tcx> {
     /// All outlives constraints.
     constraints: Constraints<'a, 'tcx>,
 
-    /// A mapping from locations in the CFG to a set of loans that go out of scope. This will be the
-    /// final result of the computation.
-    loans_out_of_scope: IndexVec<BorrowIndex, FxIndexMap<PoloniusBlock, BTreeSet<usize>>>,
     /// A mapping from loans to sets of points where the loans are in scope.
     loan_scopes: IndexVec<BorrowIndex, Option<ThinBitSet<PointIndex>>>,
 
@@ -244,7 +171,6 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
         Self {
             checked_loans: ThinBitSet::new_empty(borrow_set.len()),
             ignored_loans: ThinBitSet::new_empty(borrow_set.len()),
-            loans_out_of_scope: IndexVec::from_fn_n(|_| Default::default(), borrow_set.len()),
             loan_scopes: IndexVec::from_elem_n(None, borrow_set.len()),
             constraints,
             kills,
@@ -367,11 +293,6 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                     my_println!("    To succeeding blocks: {:?}", x);
                 }
 
-                // TODO: Look if this is necessary
-                if associated_regions.is_empty() {
-                    self.remove_kill(loan_idx, location);
-                }
-
                 // Incorporate the added regions into `associated_regions`.
                 associated_regions.union(&added_regions);
                 my_println!("    Regions: {:?}", associated_regions);
@@ -386,13 +307,13 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                     self.remove_dead_regions(location, &mut associated_regions);
                     if associated_regions.is_empty() {
                         my_println!("  Loan killed.");
-                        self.add_kill(loan_idx, location);
                         continue;
                     }
                 } else {
                     debug_assert!(!in_scope, "If it's not reachable then it's not in scope.");
                     continue;
                 }
+
                 None
             };
 
@@ -400,10 +321,7 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
             {
                 let mut associated_regions = associated_regions.clone();
                 self.remove_dead_regions(location, &mut associated_regions);
-                if associated_regions.is_empty() {
-                    my_println!("  Loan killed.");
-                    self.add_kill(loan_idx, location);
-                } else if in_scope {
+                if in_scope && !associated_regions.is_empty() {
                     in_scope_points.insert(point);
                     my_println!("    In scope at {location:?}");
                 }
@@ -635,43 +553,6 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
             if !self.regioncx.liveness_constraints().is_live_at(region, location) {
                 region_set.remove(region);
             }
-        }
-    }
-
-    fn add_kill(&mut self, loan_idx: BorrowIndex, location: Location) {
-        let reserve_location = self.borrow_set[loan_idx].reserve_location;
-        let block = if location.block == reserve_location.block
-            && location.statement_index < reserve_location.statement_index
-        {
-            PoloniusBlock::BeforeReserveLocation
-        } else if location == reserve_location {
-            // We don't make a kill at the reserve location.
-            return;
-        } else {
-            PoloniusBlock::Normal(location.block)
-        };
-
-        self.loans_out_of_scope[loan_idx]
-            .entry(block)
-            .or_insert_with(BTreeSet::default)
-            .insert(location.statement_index);
-    }
-
-    fn remove_kill(&mut self, loan_idx: BorrowIndex, location: Location) {
-        let reserve_location = self.borrow_set[loan_idx].reserve_location;
-        let block = if location.block == reserve_location.block
-            && location.statement_index < reserve_location.statement_index
-        {
-            PoloniusBlock::BeforeReserveLocation
-        } else if location == reserve_location {
-            // We don't make a kill at the reserve location.
-            return;
-        } else {
-            PoloniusBlock::Normal(location.block)
-        };
-
-        if let Some(statement_indices) = self.loans_out_of_scope[loan_idx].get_mut(&block) {
-            statement_indices.remove(&location.statement_index);
         }
     }
 

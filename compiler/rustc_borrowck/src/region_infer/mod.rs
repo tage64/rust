@@ -1,4 +1,3 @@
-#![expect(dead_code)]
 use std::collections::{BTreeMap, VecDeque};
 use std::rc::Rc;
 
@@ -196,9 +195,6 @@ pub struct RegionInferenceContext<'tcx> {
     /// Information about how the universally quantified regions in
     /// scope on this function relate to one another.
     universal_region_relations: Frozen<UniversalRegionRelations<'tcx>>,
-
-    /// Information about when loans goes out of scope computed by Polonius.
-    pub(crate) loans_out_of_scope_at_location: Option<FxIndexMap<Location, Vec<BorrowIndex>>>,
 
     /// FIXME: Should these really go here?
     pub(crate) location_map: Option<Rc<DenseLocationMap>>,
@@ -471,7 +467,6 @@ impl<'tcx> RegionInferenceContext<'tcx> {
             scc_values,
             type_tests,
             universal_region_relations,
-            loans_out_of_scope_at_location: None,
             location_map: None,
             live_region_variances: None,
         };
