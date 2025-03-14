@@ -115,6 +115,19 @@ pub(super) fn compute_loans_out_of_scope<'tcx>(
 }
 
 pub(crate) struct PoloniusOutOfScopePrecomputer<'a, 'tcx> {
+    /// A set of the loans that has been checked.
+    checked_loans: ThinBitSet<BorrowIndex>,
+
+    /// A cache for remembering which loans should be ignored.
+    ///
+    /// We have three scenarios:
+    /// - A loan is not in `self.checked_loans`: Then we don't know if it should be ignored and we
+    ///   need to compute it.
+    /// - The loan is in `self.checked_loans` but not in this set: Then the loan should not be
+    ///   ignored.
+    /// - The loan is in `self.checked_loans` and in this set: Then the loan should be ignored.
+    ignored_loans: ThinBitSet<BorrowIndex>,
+
     /// TODO: A map of all loan kills by their location. This should maybe be reworked.
     kills: BTreeMap<Location, BTreeSet<BorrowIndex>>,
     /// All regions that flows forward.
@@ -229,6 +242,8 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
         }
 
         Self {
+            checked_loans: ThinBitSet::new_empty(borrow_set.len()),
+            ignored_loans: ThinBitSet::new_empty(borrow_set.len()),
             loans_out_of_scope: IndexVec::from_fn_n(|_| Default::default(), borrow_set.len()),
             loan_scopes: IndexVec::from_elem_n(None, borrow_set.len()),
             constraints,
@@ -248,12 +263,16 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
         let borrow = &self.borrow_set[borrow_idx];
 
         // Check if this borrow is ignored.
-        // FIXME: Maybe we should cache this information.
-        if borrow.borrowed_place().ignore_borrow(
+        if self.checked_loans.insert(borrow_idx) {
+            if self.ignored_loans.contains(borrow_idx) {
+                return false;
+            }
+        } else if borrow.borrowed_place().ignore_borrow(
             self.tcx,
             self.body,
             &self.borrow_set.locals_state_at_exit,
         ) {
+            self.ignored_loans.insert(borrow_idx);
             return false;
         }
 
