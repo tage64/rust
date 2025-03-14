@@ -277,7 +277,11 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
         }
 
         // Check if this location can never be reached by the borrow.
-        if !borrow.reserve_location.successor_within_block().is_predecessor_of(location, self.body)
+        if false
+            && !borrow
+                .reserve_location
+                .successor_within_block()
+                .is_predecessor_of(location, self.body)
         {
             return false;
         }
