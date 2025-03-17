@@ -91,7 +91,7 @@ pub(crate) struct PoloniusOutOfScopePrecomputer<'a, 'tcx> {
 
     /// For every block we store the immediate predecessors.
     ///
-    /// ```
+    /// ```text
     ///       a
     ///      / \
     ///     b   c
@@ -145,6 +145,25 @@ struct LoanRegionNode {
     in_scope: bool,
     /// Whether this node has been added to the stack for processing.
     added_to_stack: bool,
+}
+
+#[derive(Debug, Copy, Clone)]
+enum OutOfScopeAtBlock {
+    /// We don't know for this block yet.
+    DontKnow,
+
+    /// The loan doesn't go out of scope at this block.
+    Never,
+
+    /// The loan goes out of scope.
+    OutOfScope { statement_index: usize },
+
+    /// The loan is killed.
+    Killed { statement_index: usize },
+
+    /// The loan goes out of scope and is killed in the same block. The kill location must be later
+    /// than the out of scope location.
+    OutOfScopeAndKilled { out_of_scope_statement_index: usize, kill_statement_index: usize },
 }
 
 impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
@@ -407,11 +426,19 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                 }
             }
 
-            // Check if the loan is killed.
-            let is_killed = self.kills.get(&location).is_some_and(|x| x.contains(&loan_idx));
-
             // Update in_scope.
-            let successor_in_scope = self.successor_in_scope(loan_idx, location, in_scope);
+            let successor_in_scope = location == loan_data.reserve_location
+                || in_scope && self.successor_in_scope(loan_idx, location);
+
+            // Check if the loan is killed.
+            let is_killed = !self.successor_in_scope(loan_idx, location)
+                && self.is_predecessor(loan_data.reserve_location, location);
+            assert_eq!(
+                is_killed,
+                self.kills.get(&location).is_some_and(|x| x.contains(&loan_idx)),
+                "{:?}",
+                self.body[location.block].statements.get(location.statement_index)
+            );
 
             // Make copies of `associated_regions` as that borrow will be killed soon.
             let mut forward_regions = associated_regions.clone();
@@ -636,24 +663,12 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
         }
     }
 
-    /// Given the `in_scope` value for a location, return the `in_scope` value for the successor
-    /// location(s).
-    fn successor_in_scope(
-        &self,
-        borrow_idx: BorrowIndex,
-        location: Location,
-        current_in_scope: bool,
-    ) -> bool {
-        if location == self.borrow_set[borrow_idx].reserve_location {
-            true
-        } else if let Some(stmt) =
-            self.body[location.block].statements.get(location.statement_index)
-        {
-            current_in_scope && !self.out_of_scope_at_stmt(borrow_idx, stmt)
+    /// Return the `in_scope` value for the successor location(s).
+    fn successor_in_scope(&self, borrow_idx: BorrowIndex, location: Location) -> bool {
+        if let Some(stmt) = self.body[location.block].statements.get(location.statement_index) {
+            !self.out_of_scope_at_stmt(borrow_idx, stmt)
         } else {
-            current_in_scope
-                && !self
-                    .out_of_scope_at_terminator(borrow_idx, &self.body[location.block].terminator())
+            !self.out_of_scope_at_terminator(borrow_idx, &self.body[location.block].terminator())
         }
     }
 
@@ -666,7 +681,7 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                 self.borrow_out_of_scope_on_place(borrow_idx, *lhs)
             }
             mir::StatementKind::StorageDead(local) => {
-                self.borrow_out_of_scope_on_place(borrow_idx, Place::from(*local))
+                self.borrow_set.local_map.get(local).is_some_and(|bs| bs.contains(&borrow_idx))
             }
             _ => false,
         }
@@ -680,8 +695,13 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
         borrow_idx: BorrowIndex,
         terminator: &Terminator<'tcx>,
     ) -> bool {
-        if let mir::TerminatorKind::InlineAsm { operands, .. } = &terminator.kind {
-            operands.iter().any(|op| {
+        match &terminator.kind {
+            // A `Call` terminator's return value can be a local which has borrows, so we need to record
+            // those as killed as well.
+            mir::TerminatorKind::Call { destination, .. } => {
+                self.borrow_out_of_scope_on_place(borrow_idx, *destination)
+            }
+            mir::TerminatorKind::InlineAsm { operands, .. } => operands.iter().any(|op| {
                 if let mir::InlineAsmOperand::Out { place: Some(place), .. }
                 | mir::InlineAsmOperand::InOut { out_place: Some(place), .. } = op
                 {
@@ -689,9 +709,8 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                 } else {
                     false
                 }
-            })
-        } else {
-            false
+            }),
+            _ => false,
         }
     }
 
