@@ -260,10 +260,6 @@ struct LoanRegionNode {
     /// Whether this location is reachable by forward edges from the loan's introduction point in
     /// the localized constraint graph.
     reachable_by_loan: bool,
-    /// Whether the loan is in scope.
-    ///
-    /// It not possible for a loan to be in scope unless `reachable_by_loan` is true.
-    in_scope: bool,
     /// Whether this node has been added to the stack for processing.
     added_to_stack: bool,
 }
@@ -453,8 +449,7 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
             LoanRegionNode {
                 associated_regions: new_empty_region_set(self.regioncx),
                 added_regions: Some(initial_region_set),
-                reachable_by_loan: true,
-                in_scope: false,
+                reachable_by_loan: false,
                 added_to_stack: true,
             },
         );
@@ -476,11 +471,9 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                 associated_regions,
                 added_regions,
                 reachable_by_loan,
-                in_scope,
                 added_to_stack,
             } = nodes.get_mut(&location).unwrap();
             let reachable_by_loan = *reachable_by_loan; // Make copy.
-            let in_scope = *in_scope; // Make copy.
 
             debug_assert!(*added_to_stack);
             *added_to_stack = false;
@@ -516,7 +509,7 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
             } else {
                 my_println!("Nothing new here.");
                 // FIXME: This should be unnecessary if we don't track kills.
-                if in_scope {
+                if reachable_by_loan {
                     // FIXME: This is just a hack.
                     let mut associated_regions = associated_regions.clone();
                     self.remove_dead_regions(location, &mut associated_regions);
@@ -525,7 +518,6 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                         continue;
                     }
                 } else {
-                    debug_assert!(!in_scope, "If it's not reachable then it's not in scope.");
                     continue;
                 }
 
@@ -536,15 +528,15 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
             {
                 let mut associated_regions = associated_regions.clone();
                 self.remove_dead_regions(location, &mut associated_regions);
-                if in_scope && !associated_regions.is_empty() {
+                if reachable_by_loan && !associated_regions.is_empty() {
                     in_scope_points.insert(point);
                     my_println!("    In scope at {location:?}");
                 }
             }
 
             // Update in_scope.
-            let successor_in_scope = location == loan_data.reserve_location
-                || in_scope && self.successor_in_scope(loan_idx, location);
+            let successor_reachable_by_loan = location == loan_data.reserve_location
+                || reachable_by_loan && self.successor_in_scope(loan_idx, location);
 
             // Check if the loan is killed.
             let is_killed = !self.successor_in_scope(loan_idx, location)
@@ -563,7 +555,6 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                         associated_regions: new_empty_region_set(self.regioncx),
                         added_regions: None,
                         reachable_by_loan: false,
-                        in_scope: false,
                         added_to_stack: false,
                     });
                 if !is_killed {
@@ -588,12 +579,8 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                     }
                     successor_has_changed = true;
                 }
-                if reachable_by_loan && !successor_node.reachable_by_loan {
-                    successor_node.reachable_by_loan = reachable_by_loan;
-                    successor_has_changed = true;
-                }
-                if successor_in_scope && !successor_node.in_scope {
-                    successor_node.in_scope = successor_in_scope;
+                if successor_reachable_by_loan && !successor_node.reachable_by_loan {
+                    successor_node.reachable_by_loan = successor_reachable_by_loan;
                     successor_has_changed = true;
                 }
                 if successor_has_changed && !successor_node.added_to_stack {
@@ -610,7 +597,6 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                             associated_regions: new_empty_region_set(self.regioncx),
                             added_regions: None,
                             reachable_by_loan: false,
-                            in_scope: false,
                             added_to_stack: false,
                         });
                     if !is_killed {
@@ -644,12 +630,8 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                         }
                         successor_has_changed = true;
                     }
-                    if reachable_by_loan && !successor_node.reachable_by_loan {
-                        successor_node.reachable_by_loan = reachable_by_loan;
-                        successor_has_changed = true;
-                    }
-                    if successor_in_scope && !successor_node.in_scope {
-                        successor_node.in_scope = successor_in_scope;
+                    if successor_reachable_by_loan && !successor_node.reachable_by_loan {
+                        successor_node.reachable_by_loan = successor_reachable_by_loan;
                         successor_has_changed = true;
                     }
                     if successor_has_changed && !successor_node.added_to_stack {
@@ -668,7 +650,6 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                         associated_regions: new_empty_region_set(self.regioncx),
                         added_regions: None,
                         reachable_by_loan: false,
-                        in_scope: false,
                         added_to_stack: false,
                     });
                 // To comply with previous Polonius, this if condition was:
@@ -711,7 +692,6 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                             associated_regions: new_empty_region_set(self.regioncx),
                             added_regions: None,
                             reachable_by_loan: false,
-                            in_scope: false,
                             added_to_stack: false,
                         });
                     if !is_killed {
