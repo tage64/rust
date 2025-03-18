@@ -423,19 +423,18 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
             return false;
         }
 
+        let point = self.location_map.point_from_location(location);
+        if let Some(in_scope_points) = &self.loan_scopes[borrow_idx] {
+            return in_scope_points.contains(point);
+        }
+
         // Check if the loan is killed anywhere between its reserve location and `location`.
         let Some(_live_paths) = self.live_paths(borrow_idx, location) else {
             return false;
         };
 
-        let point = self.location_map.point_from_location(location);
-        if let Some(in_scope_points) = &self.loan_scopes[borrow_idx] {
-            in_scope_points
-        } else {
-            let in_scope_points = self.compute_loan_out_of_scope(borrow_idx);
-            self.loan_scopes[borrow_idx].insert(in_scope_points)
-        }
-        .contains(point)
+        let in_scope_points = self.compute_loan_out_of_scope(borrow_idx);
+        self.loan_scopes[borrow_idx].insert(in_scope_points).contains(point)
     }
 
     fn compute_loan_out_of_scope(&mut self, loan_idx: BorrowIndex) -> ThinBitSet<PointIndex> {
