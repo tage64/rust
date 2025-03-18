@@ -596,11 +596,6 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                     successor_node.in_scope = successor_in_scope;
                     successor_has_changed = true;
                 }
-                // FIXME: Only necessary if we record the kills of loans.
-                if successor_node.associated_regions.is_empty() {
-                    successor_has_changed = true;
-                    // That node is killed.
-                }
                 if successor_has_changed && !successor_node.added_to_stack {
                     stack.push(successor_location);
                     successor_node.added_to_stack = true;
@@ -656,11 +651,6 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                     if successor_in_scope && !successor_node.in_scope {
                         successor_node.in_scope = successor_in_scope;
                         successor_has_changed = true;
-                    }
-                    // FIXME: Only necessary if we record the kills of loans.
-                    if successor_node.associated_regions.is_empty() {
-                        successor_has_changed = true;
-                        // That node is killed.
                     }
                     if successor_has_changed && !successor_node.added_to_stack {
                         stack.push(successor_location);
