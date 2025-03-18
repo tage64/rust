@@ -2,7 +2,7 @@
 #![deny(unused_imports)]
 mod constraints;
 mod loan_invalidations;
-use std::cell::OnceCell;
+use std::cell::{OnceCell, RefCell};
 use std::collections::BTreeMap;
 use std::sync::LazyLock;
 
@@ -68,9 +68,6 @@ pub(crate) struct PoloniusOutOfScopePrecomputer<'a, 'tcx> {
     /// All outlives constraints.
     constraints: Constraints<'a, 'tcx>,
 
-    /// A mapping from loans to sets of points where the loans are in scope.
-    loan_scopes: IndexVec<BorrowIndex, Option<ThinBitSet<PointIndex>>>,
-
     /// For every block, we store a set of all proceeding blocks.
     ///
     /// ```
@@ -111,6 +108,9 @@ pub(crate) struct PoloniusOutOfScopePrecomputer<'a, 'tcx> {
 
     /// Information of when loan's are killed.
     kills: IndexVec<BorrowIndex, IndexVec<PoloniusBlock, OnceCell<KillAtBlock>>>,
+
+    // FIXME: Find better names.
+    scope_computations: RefCell<FxHashMap<BorrowIndex, ScopeComputation>>,
 
     tcx: TyCtxt<'tcx>,
     regioncx: &'a RegionInferenceContext<'tcx>,
@@ -264,6 +264,42 @@ struct LoanRegionNode {
     added_to_stack: bool,
 }
 
+struct ScopeComputation {
+    nodes: FxHashMap<Location, LoanRegionNode>,
+    stack: Vec<Location>,
+
+    /// A set op points where we definitely know that the loan is in scope.
+    in_scope: ThinBitSet<PointIndex>,
+}
+
+impl ScopeComputation {
+    fn new(
+        regioncx: &RegionInferenceContext<'_>,
+        location_map: &DenseLocationMap,
+        borrow: &BorrowData<'_>,
+    ) -> Self {
+        // Put the loan's initial region in a set.
+        let mut initial_region_set = new_empty_region_set(regioncx);
+        initial_region_set.insert(borrow.region);
+
+        let mut nodes = FxHashMap::default();
+        nodes.insert(
+            borrow.reserve_location,
+            LoanRegionNode {
+                associated_regions: new_empty_region_set(regioncx),
+                added_regions: Some(initial_region_set),
+                reachable_by_loan: false,
+                added_to_stack: true,
+            },
+        );
+        Self {
+            stack: vec![borrow.reserve_location],
+            nodes,
+            in_scope: ThinBitSet::new_empty(location_map.num_points()),
+        }
+    }
+}
+
 /// Information of when/if a loan is killed at a block.
 #[derive(Debug, Copy, Clone)]
 enum KillAtBlock {
@@ -381,13 +417,13 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
         Self {
             checked_loans: ThinBitSet::new_empty(borrow_set.len()),
             ignored_loans: ThinBitSet::new_empty(borrow_set.len()),
-            loan_scopes: IndexVec::from_elem_n(None, borrow_set.len()),
             constraints,
             forward_regions,
             backward_regions,
             transitive_predecessors,
             adjacent_predecessors,
             kills: IndexVec::from_elem_n(IndexVec::new(), borrow_set.len()),
+            scope_computations: RefCell::new(FxHashMap::default()),
             tcx,
             regioncx,
             body,
@@ -420,8 +456,8 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
         }
 
         let point = self.location_map.point_from_location(location);
-        if let Some(in_scope_points) = &self.loan_scopes[borrow_idx] {
-            return in_scope_points.contains(point);
+        if let Some(scope_computation) = self.scope_computations.borrow().get(&borrow_idx) {
+            return scope_computation.in_scope.contains(point);
         }
 
         // Check if the loan is killed anywhere between its reserve location and `location`.
@@ -429,31 +465,16 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
             return false;
         };
 
-        let in_scope_points = self.compute_loan_out_of_scope(borrow_idx);
-        self.loan_scopes[borrow_idx].insert(in_scope_points).contains(point)
+        self.compute_loan_scope(borrow_idx, point)
     }
 
-    fn compute_loan_out_of_scope(&mut self, loan_idx: BorrowIndex) -> ThinBitSet<PointIndex> {
-        my_println!("- Loan {:?}", loan_idx);
+    fn compute_loan_scope(&mut self, loan_idx: BorrowIndex, point: PointIndex) -> bool {
         let loan_data = &self.borrow_set[loan_idx];
-        let mut in_scope_points = ThinBitSet::new_empty(self.location_map.num_points());
 
-        // Put the loan's initial region in a set.
-        let mut initial_region_set = new_empty_region_set(self.regioncx);
-        initial_region_set.insert(loan_data.region);
-
-        let mut nodes = FxHashMap::default();
-        let mut stack = Vec::new();
-        nodes.insert(
-            loan_data.reserve_location,
-            LoanRegionNode {
-                associated_regions: new_empty_region_set(self.regioncx),
-                added_regions: Some(initial_region_set),
-                reachable_by_loan: false,
-                added_to_stack: true,
-            },
-        );
-        stack.push(loan_data.reserve_location);
+        let mut scope_computations = self.scope_computations.borrow_mut();
+        let ScopeComputation { stack, nodes, in_scope } = scope_computations
+            .entry(loan_idx)
+            .or_insert_with(|| ScopeComputation::new(self.regioncx, self.location_map, loan_data));
 
         while let Some(location) = stack.pop() {
             let point = self.location_map.point_from_location(location);
@@ -529,7 +550,7 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                 let mut associated_regions = associated_regions.clone();
                 self.remove_dead_regions(location, &mut associated_regions);
                 if reachable_by_loan && !associated_regions.is_empty() {
-                    in_scope_points.insert(point);
+                    in_scope.insert(point);
                     my_println!("    In scope at {location:?}");
                 }
             }
@@ -710,7 +731,7 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
             }
         }
 
-        in_scope_points
+        in_scope.contains(point)
     }
 
     /// Remove dead regions from the set of associated regions.
