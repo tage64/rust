@@ -516,7 +516,7 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
             } else {
                 my_println!("Nothing new here.");
                 // FIXME: This should be unnecessary if we don't track kills.
-                if reachable_by_loan {
+                if in_scope {
                     // FIXME: This is just a hack.
                     let mut associated_regions = associated_regions.clone();
                     self.remove_dead_regions(location, &mut associated_regions);
