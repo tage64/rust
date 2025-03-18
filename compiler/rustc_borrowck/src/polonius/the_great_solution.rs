@@ -269,6 +269,7 @@ struct LoanRegionNode {
 struct ScopeComputation {
     nodes: FxHashMap<Location, LoanRegionNode>,
     stack: Vec<Location>,
+    is_finished: bool,
 }
 
 impl ScopeComputation {
@@ -288,7 +289,7 @@ impl ScopeComputation {
                 added_to_stack: true,
             },
         );
-        Self { stack: vec![borrow.reserve_location], nodes }
+        Self { stack: vec![borrow.reserve_location], nodes, is_finished: false }
     }
 }
 
@@ -430,6 +431,8 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
 
         // Check if this borrow is ignored.
         if !self.checked_loans.insert(borrow_idx) {
+            // This loan has been checked before so we have already computed if it should be ignored
+            // or not.
             if self.ignored_loans.contains(borrow_idx) {
                 return false;
             }
@@ -447,10 +450,13 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
             return false;
         }
 
-        if let Some(node) =
-            self.scope_computations.borrow().get(&borrow_idx).and_then(|x| x.nodes.get(&location))
-        {
-            return node.in_scope;
+        // Check if we have already computed an "in scope-value" for location.
+        if let Some(scope_computation) = self.scope_computations.borrow().get(&borrow_idx) {
+            if scope_computation.is_finished {
+                return scope_computation.nodes.get(&location).is_some_and(|x| x.in_scope);
+            } else if scope_computation.nodes.get(&location).is_some_and(|x| x.in_scope) {
+                return true;
+            }
         }
 
         // Check if the loan is killed anywhere between its reserve location and `location`.
@@ -465,9 +471,11 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
         let loan_data = &self.borrow_set[loan_idx];
 
         let mut scope_computations = self.scope_computations.borrow_mut();
-        let ScopeComputation { stack, nodes } = scope_computations
+        let ScopeComputation { stack, nodes, is_finished } = scope_computations
             .entry(loan_idx)
             .or_insert_with(|| ScopeComputation::new(self.regioncx, loan_data));
+
+        debug_assert!(!*is_finished);
 
         while let Some(location) = stack.pop() {
             let point = self.location_map.point_from_location(location);
@@ -736,7 +744,8 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
             }
         }
 
-        false
+        *is_finished = true;
+        nodes.get(&target_location).is_some_and(|x| x.in_scope)
     }
 
     /// Remove dead regions from the set of associated regions.
