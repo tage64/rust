@@ -534,16 +534,15 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                 }
             }
 
-            // Update in_scope.
-            let successor_reachable_by_loan = location == loan_data.reserve_location
-                || reachable_by_loan && self.successor_in_scope(loan_idx, location);
-
             // Check if the loan is killed.
-            if !self.successor_in_scope(loan_idx, location)
-                && self.is_predecessor(loan_data.reserve_location, location)
-            {
+            let is_kill = self.is_kill(loan_idx, location);
+
+            if is_kill && reachable_by_loan {
                 continue;
             }
+
+            let successor_reachable_by_loan =
+                !is_kill && reachable_by_loan || location == loan_data.reserve_location;
 
             // Make copies of `associated_regions` as that borrow will be killed soon.
             let mut forward_regions = associated_regions.clone();
@@ -723,12 +722,12 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
         }
     }
 
-    /// Return the `in_scope` value for the successor location(s).
-    fn successor_in_scope(&self, borrow_idx: BorrowIndex, location: Location) -> bool {
+    /// Returns `true` if the loan is killed before the successor location(s).
+    fn is_kill(&self, borrow_idx: BorrowIndex, location: Location) -> bool {
         if let Some(stmt) = self.body[location.block].statements.get(location.statement_index) {
-            !self.kill_at_stmt(borrow_idx, stmt)
+            self.kill_at_stmt(borrow_idx, stmt)
         } else {
-            !self.kill_at_terminator(borrow_idx, &self.body[location.block].terminator())
+            self.kill_at_terminator(borrow_idx, &self.body[location.block].terminator())
         }
     }
 
