@@ -423,6 +423,11 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
             return false;
         }
 
+        // Check if the loan is killed anywhere between its reserve location and `location`.
+        let Some(_live_paths) = self.live_paths(borrow_idx, location) else {
+            return false;
+        };
+
         let point = self.location_map.point_from_location(location);
         if let Some(in_scope_points) = &self.loan_scopes[borrow_idx] {
             in_scope_points
@@ -906,6 +911,7 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
             let basic_block = block.basic_block(self.body, borrow);
 
             // Check if the loan is killed in this block.
+            self.kills[borrow_idx].ensure_contains_elem(block, OnceCell::new);
             if let Killed { .. } = self.kills[borrow_idx][block].get_or_init(|| {
                 self.kill_at_block(
                     borrow_idx,
