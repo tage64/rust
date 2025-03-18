@@ -6,12 +6,14 @@ use std::cell::{OnceCell, RefCell};
 use std::collections::BTreeMap;
 use std::sync::LazyLock;
 
-use constraints::Constraints;
+use constraints::{Constraints, TimeTravellingRegions};
 use itertools::Either;
 use rustc_data_structures::fx::FxHashMap;
 use rustc_index::bit_set::thin_bit_set::{SparseBitMatrix, ThinBitSet};
 use rustc_index::{Idx, IndexVec};
-use rustc_middle::mir::{self, BasicBlock, Body, Location, Place, Statement, Terminator};
+use rustc_middle::mir::{
+    self, BasicBlock, BasicBlockData, Body, Location, Place, Statement, Terminator,
+};
 use rustc_middle::ty::TyCtxt;
 use rustc_mir_dataflow::points::DenseLocationMap;
 use smallvec::{SmallVec, smallvec};
@@ -453,7 +455,12 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
         // Check if we have already computed an "in scope-value" for location.
         if let Some(scope_computation) = self.scope_computations.borrow().get(&borrow_idx) {
             if scope_computation.is_finished {
+                // If the scope computation is finished, it's appropriate to return `false` if no
+                // node for the location exists.
                 return scope_computation.nodes.get(&location).is_some_and(|x| x.in_scope);
+
+                // If the computation is not finished, we can only be sure if the `in_scope`-field
+                // has been set to `true` for the relevant node.
             } else if scope_computation.nodes.get(&location).is_some_and(|x| x.in_scope) {
                 return true;
             }
@@ -517,10 +524,10 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                 if let Some(tf) = &time_travelling_regions.to_prev_stmt {
                     my_println!("    Backward time travellers: {:?}", tf);
                 }
-                if let Some(x) = &time_travelling_regions.to_preceeding_blocks {
+                if let Some(x) = &time_travelling_regions.to_predecessor_blocks {
                     my_println!("    To preceeding blocks: {:?}", x);
                 }
-                if let Some(x) = &time_travelling_regions.to_succeeding_blocks {
+                if let Some(x) = &time_travelling_regions.to_successor_blocks {
                     my_println!("    To succeeding blocks: {:?}", x);
                 }
 
@@ -570,174 +577,56 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
             // FIXME: Is this necessary?
             let in_scope = *in_scope;
 
-            // Make copies of `associated_regions` as that borrow will be killed soon.
-            let mut forward_regions = associated_regions.clone();
-            let mut backward_regions = associated_regions.clone();
+            let associated_regions = associated_regions.clone();
 
-            // Check for forward regions.
-            forward_regions.intersect(&self.forward_regions);
-            if location.statement_index < block_data.statements.len() {
-                let successor_location = location.successor_within_block();
-                let successor_node =
-                    nodes.entry(successor_location).or_insert_with(|| LoanRegionNode {
+            self.visit_adjacent_locations(
+                block_data,
+                location,
+                time_travelling_regions,
+                |new_location, time_travellers, is_forward| {
+                    let new_node = nodes.entry(new_location).or_insert_with(|| LoanRegionNode {
                         associated_regions: new_empty_region_set(self.regioncx),
                         added_regions: None,
                         reachable_by_loan: false,
                         in_scope: false,
                         added_to_stack: false,
                     });
-                self.remove_dead_regions(location, &mut forward_regions);
-                self.remove_dead_regions(successor_location, &mut forward_regions);
-                if let Some(tr) = &time_travelling_regions {
-                    if let Some(time_travellers) = &tr.to_next_loc {
-                        forward_regions.union(time_travellers);
-                    }
-                }
-                forward_regions.subtract(&successor_node.associated_regions);
-                let mut successor_has_changed = false;
-                if !forward_regions.is_empty() {
-                    my_println!("    Found forward regions: {:?}", forward_regions);
-                    if let Some(added_regions) = successor_node.added_regions.as_mut() {
-                        added_regions.union(&forward_regions);
+
+                    let mut added_regions = associated_regions.clone();
+
+                    if is_forward {
+                        added_regions.intersect(&self.forward_regions);
                     } else {
-                        successor_node.added_regions = Some(forward_regions);
+                        added_regions.intersect(&self.backward_regions);
                     }
-                    successor_has_changed = true;
-                }
-                if successor_reachable_by_loan && !successor_node.reachable_by_loan {
-                    successor_node.reachable_by_loan = successor_reachable_by_loan;
-                    successor_has_changed = true;
-                }
-                if successor_has_changed && !successor_node.added_to_stack {
-                    stack.push(successor_location);
-                    successor_node.added_to_stack = true;
-                }
-            } else {
-                for successor_block in block_data.terminator().successors() {
-                    let mut forward_regions = forward_regions.clone();
-                    let successor_location =
-                        Location { block: successor_block, statement_index: 0 };
-                    let successor_node =
-                        nodes.entry(successor_location).or_insert_with(|| LoanRegionNode {
-                            associated_regions: new_empty_region_set(self.regioncx),
-                            added_regions: None,
-                            reachable_by_loan: false,
-                            in_scope: false,
-                            added_to_stack: false,
-                        });
-                    self.remove_dead_regions(location, &mut forward_regions);
-                    self.remove_dead_regions(successor_location, &mut forward_regions);
-                    if let Some(tr) = &time_travelling_regions {
-                        if let Some(time_travellers) =
-                            tr.to_succeeding_blocks.as_ref().and_then(|x| x.row(successor_block))
-                        {
-                            forward_regions.union(time_travellers);
-                        }
-                    }
-                    forward_regions.subtract(&successor_node.associated_regions);
 
-                    let mut successor_has_changed = false;
-                    if !forward_regions.is_empty() {
-                        my_println!(
-                            "    Found forward regions to {:?}: {:?}",
-                            successor_location,
-                            forward_regions
-                        );
-                        if let Some(added_regions) = successor_node.added_regions.as_mut() {
-                            added_regions.union(&forward_regions);
+                    self.remove_dead_regions(location, &mut added_regions);
+                    self.remove_dead_regions(new_location, &mut added_regions);
+                    if let Some(time_travellers) = time_travellers {
+                        added_regions.union(time_travellers);
+                    }
+
+                    added_regions.subtract(&new_node.associated_regions);
+
+                    let mut new_has_changed = false;
+                    if !added_regions.is_empty() {
+                        if let Some(already_added_regions) = new_node.added_regions.as_mut() {
+                            already_added_regions.union(&added_regions);
                         } else {
-                            successor_node.added_regions = Some(forward_regions);
+                            new_node.added_regions = Some(added_regions);
                         }
-                        successor_has_changed = true;
+                        new_has_changed = true;
                     }
-                    if successor_reachable_by_loan && !successor_node.reachable_by_loan {
-                        successor_node.reachable_by_loan = successor_reachable_by_loan;
-                        successor_has_changed = true;
+                    if is_forward && successor_reachable_by_loan && !new_node.reachable_by_loan {
+                        new_node.reachable_by_loan = true;
+                        new_has_changed = true;
                     }
-                    if successor_has_changed && !successor_node.added_to_stack {
-                        stack.push(successor_location);
-                        successor_node.added_to_stack = true;
+                    if new_has_changed && !new_node.added_to_stack {
+                        stack.push(new_location);
+                        new_node.added_to_stack = true;
                     }
-                }
-            }
-
-            // Check for backward regions.
-            backward_regions.intersect(&self.backward_regions);
-            if location.statement_index > 0 {
-                let predecessor_location = location.predecessor_within_block();
-                let predecessor_node =
-                    nodes.entry(predecessor_location).or_insert_with(|| LoanRegionNode {
-                        associated_regions: new_empty_region_set(self.regioncx),
-                        added_regions: None,
-                        reachable_by_loan: false,
-                        in_scope: false,
-                        added_to_stack: false,
-                    });
-                self.remove_dead_regions(location, &mut backward_regions);
-                self.remove_dead_regions(predecessor_location, &mut backward_regions);
-                if let Some(tr) = &time_travelling_regions {
-                    if let Some(time_travellers) = &tr.to_prev_stmt {
-                        backward_regions.union(time_travellers);
-                    }
-                }
-                backward_regions.subtract(&predecessor_node.associated_regions);
-
-                if !backward_regions.is_empty() {
-                    my_println!("    Found backward regions: {:?}", backward_regions);
-                    if let Some(added_regions) = predecessor_node.added_regions.as_mut() {
-                        added_regions.union(&backward_regions);
-                    } else {
-                        predecessor_node.added_regions = Some(backward_regions);
-                    }
-                    if !predecessor_node.added_to_stack {
-                        stack.push(predecessor_location);
-                        predecessor_node.added_to_stack = true;
-                    }
-                }
-            } else {
-                for &predecessor_block in &self.body.basic_blocks.predecessors()[location.block] {
-                    let mut backward_regions = backward_regions.clone();
-                    let predecessor_location = Location {
-                        block: predecessor_block,
-                        statement_index: self.body[predecessor_block].statements.len(),
-                    };
-                    let predecessor_node =
-                        nodes.entry(predecessor_location).or_insert_with(|| LoanRegionNode {
-                            associated_regions: new_empty_region_set(self.regioncx),
-                            added_regions: None,
-                            reachable_by_loan: false,
-                            in_scope: false,
-                            added_to_stack: false,
-                        });
-                    self.remove_dead_regions(location, &mut backward_regions);
-                    self.remove_dead_regions(predecessor_location, &mut backward_regions);
-                    if let Some(tr) = &time_travelling_regions {
-                        if let Some(time_travellers) =
-                            tr.to_preceeding_blocks.as_ref().and_then(|x| x.row(predecessor_block))
-                        {
-                            backward_regions.union(time_travellers);
-                        }
-                    }
-                    backward_regions.subtract(&predecessor_node.associated_regions);
-
-                    if !backward_regions.is_empty() {
-                        my_println!(
-                            "    Found backward regions to {:?}: {:?}",
-                            predecessor_location,
-                            backward_regions
-                        );
-                        if let Some(added_regions) = predecessor_node.added_regions.as_mut() {
-                            added_regions.union(&backward_regions);
-                        } else {
-                            predecessor_node.added_regions = Some(backward_regions);
-                        }
-                        if !predecessor_node.added_to_stack {
-                            stack.push(predecessor_location);
-                            predecessor_node.added_to_stack = true;
-                        }
-                    }
-                }
-            }
+                },
+            );
 
             if in_scope && location == target_location {
                 return true;
@@ -746,6 +635,50 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
 
         *is_finished = true;
         nodes.get(&target_location).is_some_and(|x| x.in_scope)
+    }
+
+    #[inline]
+    fn visit_adjacent_locations(
+        &self,
+        block_data: &BasicBlockData<'tcx>,
+        location: Location,
+        maybe_time_travellers: Option<TimeTravellingRegions>,
+        mut op: impl FnMut(Location, Option<&ThinBitSet<RegionVid>>, bool),
+    ) {
+        // Forwards:
+        if location.statement_index < block_data.statements.len() {
+            let successor_location = location.successor_within_block();
+            let time_travellers =
+                maybe_time_travellers.as_ref().and_then(|t| t.to_next_loc.as_ref());
+            op(successor_location, time_travellers, true);
+        } else {
+            for successor_block in block_data.terminator().successors() {
+                let successor_location = Location { block: successor_block, statement_index: 0 };
+                let time_travellers = maybe_time_travellers.as_ref().and_then(|t| {
+                    t.to_successor_blocks.as_ref().and_then(|x| x.row(successor_block))
+                });
+                op(successor_location, time_travellers, true);
+            }
+        }
+
+        // Backwards:
+        if location.statement_index > 0 {
+            let predecessor_location = location.predecessor_within_block();
+            let time_travellers =
+                maybe_time_travellers.as_ref().and_then(|t| t.to_prev_stmt.as_ref());
+            op(predecessor_location, time_travellers, false);
+        } else {
+            for &predecessor_block in &self.body.basic_blocks.predecessors()[location.block] {
+                let predecessor_location = Location {
+                    block: predecessor_block,
+                    statement_index: self.body[predecessor_block].statements.len(),
+                };
+                let time_travellers = maybe_time_travellers.as_ref().and_then(|t| {
+                    t.to_predecessor_blocks.as_ref().and_then(|x| x.row(predecessor_block))
+                });
+                op(predecessor_location, time_travellers, false);
+            }
+        }
     }
 
     /// Remove dead regions from the set of associated regions.

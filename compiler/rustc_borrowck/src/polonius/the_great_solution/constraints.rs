@@ -117,9 +117,9 @@ enum TimeTravelKind {
 #[derive(Default)]
 pub(crate) struct TimeTravellingRegions {
     pub to_prev_stmt: Option<ThinBitSet<RegionVid>>,
-    pub to_preceeding_blocks: Option<SparseBitMatrix<BasicBlock, RegionVid>>,
+    pub to_predecessor_blocks: Option<SparseBitMatrix<BasicBlock, RegionVid>>,
     pub to_next_loc: Option<ThinBitSet<RegionVid>>,
-    pub to_succeeding_blocks: Option<SparseBitMatrix<BasicBlock, RegionVid>>,
+    pub to_successor_blocks: Option<SparseBitMatrix<BasicBlock, RegionVid>>,
 }
 
 impl TimeTravellingRegions {
@@ -143,24 +143,24 @@ impl TimeTravellingRegions {
         }
     }
 
-    fn add_to_preceeding_block(
+    fn add_to_predecessor_block(
         &mut self,
         regioncx: &RegionInferenceContext<'_>,
         region: RegionVid,
         preceeding_block: BasicBlock,
     ) {
-        self.to_preceeding_blocks
+        self.to_predecessor_blocks
             .get_or_insert_with(|| new_region_matrix(regioncx))
             .insert(preceeding_block, region);
     }
 
-    fn add_to_succeeding_block(
+    fn add_to_successor_block(
         &mut self,
         regioncx: &RegionInferenceContext<'_>,
         region: RegionVid,
         succeeding_block: BasicBlock,
     ) {
-        self.to_succeeding_blocks
+        self.to_successor_blocks
             .get_or_insert_with(|| new_region_matrix(regioncx))
             .insert(succeeding_block, region);
     }
@@ -395,7 +395,7 @@ impl<'a, 'tcx> Constraints<'a, 'tcx> {
                         (
                             TimeTravelDirection::Forwards,
                             TimeTravelKind::InterBlock { target_block },
-                        ) => time_travelling_regions.add_to_succeeding_block(
+                        ) => time_travelling_regions.add_to_successor_block(
                             self.regioncx,
                             constraint.sub,
                             target_block,
@@ -403,7 +403,7 @@ impl<'a, 'tcx> Constraints<'a, 'tcx> {
                         (
                             TimeTravelDirection::Backwards,
                             TimeTravelKind::InterBlock { target_block },
-                        ) => time_travelling_regions.add_to_preceeding_block(
+                        ) => time_travelling_regions.add_to_predecessor_block(
                             self.regioncx,
                             constraint.sub,
                             target_block,
