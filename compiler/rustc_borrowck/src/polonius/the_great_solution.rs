@@ -539,8 +539,11 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                 || reachable_by_loan && self.successor_in_scope(loan_idx, location);
 
             // Check if the loan is killed.
-            let is_killed = !self.successor_in_scope(loan_idx, location)
-                && self.is_predecessor(loan_data.reserve_location, location);
+            if !self.successor_in_scope(loan_idx, location)
+                && self.is_predecessor(loan_data.reserve_location, location)
+            {
+                continue;
+            }
 
             // Make copies of `associated_regions` as that borrow will be killed soon.
             let mut forward_regions = associated_regions.clone();
@@ -557,18 +560,14 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                         reachable_by_loan: false,
                         added_to_stack: false,
                     });
-                if !is_killed {
-                    self.remove_dead_regions(location, &mut forward_regions);
-                    self.remove_dead_regions(successor_location, &mut forward_regions);
-                    if let Some(tr) = &time_travelling_regions {
-                        if let Some(time_travellers) = &tr.to_next_loc {
-                            forward_regions.union(time_travellers);
-                        }
+                self.remove_dead_regions(location, &mut forward_regions);
+                self.remove_dead_regions(successor_location, &mut forward_regions);
+                if let Some(tr) = &time_travelling_regions {
+                    if let Some(time_travellers) = &tr.to_next_loc {
+                        forward_regions.union(time_travellers);
                     }
-                    forward_regions.subtract(&successor_node.associated_regions);
-                } else {
-                    forward_regions.clear();
                 }
+                forward_regions.subtract(&successor_node.associated_regions);
                 let mut successor_has_changed = false;
                 if !forward_regions.is_empty() {
                     my_println!("    Found forward regions: {:?}", forward_regions);
@@ -599,22 +598,16 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                             reachable_by_loan: false,
                             added_to_stack: false,
                         });
-                    if !is_killed {
-                        self.remove_dead_regions(location, &mut forward_regions);
-                        self.remove_dead_regions(successor_location, &mut forward_regions);
-                        if let Some(tr) = &time_travelling_regions {
-                            if let Some(time_travellers) = tr
-                                .to_succeeding_blocks
-                                .as_ref()
-                                .and_then(|x| x.row(successor_block))
-                            {
-                                forward_regions.union(time_travellers);
-                            }
+                    self.remove_dead_regions(location, &mut forward_regions);
+                    self.remove_dead_regions(successor_location, &mut forward_regions);
+                    if let Some(tr) = &time_travelling_regions {
+                        if let Some(time_travellers) =
+                            tr.to_succeeding_blocks.as_ref().and_then(|x| x.row(successor_block))
+                        {
+                            forward_regions.union(time_travellers);
                         }
-                        forward_regions.subtract(&successor_node.associated_regions);
-                    } else {
-                        forward_regions.clear();
                     }
+                    forward_regions.subtract(&successor_node.associated_regions);
 
                     let mut successor_has_changed = false;
                     if !forward_regions.is_empty() {
@@ -652,21 +645,14 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                         reachable_by_loan: false,
                         added_to_stack: false,
                     });
-                // To comply with previous Polonius, this if condition was:
-                // `!is_killed || !location.is_predecessor_of(predecessor_location)`
-                // But it doesn't seem to be needed to pass the tests.
-                if !is_killed {
-                    self.remove_dead_regions(location, &mut backward_regions);
-                    self.remove_dead_regions(predecessor_location, &mut backward_regions);
-                    if let Some(tr) = &time_travelling_regions {
-                        if let Some(time_travellers) = &tr.to_prev_stmt {
-                            backward_regions.union(time_travellers);
-                        }
+                self.remove_dead_regions(location, &mut backward_regions);
+                self.remove_dead_regions(predecessor_location, &mut backward_regions);
+                if let Some(tr) = &time_travelling_regions {
+                    if let Some(time_travellers) = &tr.to_prev_stmt {
+                        backward_regions.union(time_travellers);
                     }
-                    backward_regions.subtract(&predecessor_node.associated_regions);
-                } else {
-                    backward_regions.clear();
                 }
+                backward_regions.subtract(&predecessor_node.associated_regions);
 
                 if !backward_regions.is_empty() {
                     my_println!("    Found backward regions: {:?}", backward_regions);
@@ -694,22 +680,16 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                             reachable_by_loan: false,
                             added_to_stack: false,
                         });
-                    if !is_killed {
-                        self.remove_dead_regions(location, &mut backward_regions);
-                        self.remove_dead_regions(predecessor_location, &mut backward_regions);
-                        if let Some(tr) = &time_travelling_regions {
-                            if let Some(time_travellers) = tr
-                                .to_preceeding_blocks
-                                .as_ref()
-                                .and_then(|x| x.row(predecessor_block))
-                            {
-                                backward_regions.union(time_travellers);
-                            }
+                    self.remove_dead_regions(location, &mut backward_regions);
+                    self.remove_dead_regions(predecessor_location, &mut backward_regions);
+                    if let Some(tr) = &time_travelling_regions {
+                        if let Some(time_travellers) =
+                            tr.to_preceeding_blocks.as_ref().and_then(|x| x.row(predecessor_block))
+                        {
+                            backward_regions.union(time_travellers);
                         }
-                        backward_regions.subtract(&predecessor_node.associated_regions);
-                    } else {
-                        backward_regions.clear();
                     }
+                    backward_regions.subtract(&predecessor_node.associated_regions);
 
                     if !backward_regions.is_empty() {
                         my_println!(
