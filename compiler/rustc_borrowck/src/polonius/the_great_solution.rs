@@ -554,14 +554,11 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                 None
             };
 
-            // FIXME: This is just a hack.
-            {
-                let mut associated_regions = associated_regions.clone();
-                self.remove_dead_regions(location, &mut associated_regions);
-                if reachable_by_loan && !associated_regions.is_empty() {
-                    *in_scope = true;
-                    my_println!("    In scope at {location:?}");
-                }
+            let mut associated_regions = associated_regions.clone();
+            self.remove_dead_regions(location, &mut associated_regions);
+            if reachable_by_loan && !associated_regions.is_empty() {
+                *in_scope = true;
+                my_println!("    In scope at {location:?}");
             }
 
             // Check if the loan is killed.
@@ -574,10 +571,8 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
             let successor_reachable_by_loan =
                 !is_kill && reachable_by_loan || location == loan_data.reserve_location;
 
-            // FIXME: Is this necessary?
+            // Necessary to make the borrow checker happy.
             let in_scope = *in_scope;
-
-            let associated_regions = associated_regions.clone();
 
             self.visit_adjacent_locations(
                 block_data,
@@ -592,36 +587,43 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                         added_to_stack: false,
                     });
 
-                    let mut added_regions = associated_regions.clone();
+                    // Keep track of whether `new_node` has changed.
+                    let mut new_node_changed = false;
 
+                    // If we are going forwards, we need to propagate reachability for the loan.
+                    if is_forward && successor_reachable_by_loan && !new_node.reachable_by_loan {
+                        new_node.reachable_by_loan = true;
+                        // `reachable_by_loan` was `false` before on `new_node` but has now been
+                        // changed to `true`.
+                        new_node_changed = true;
+                    }
+
+                    // Check if any regions should be added to `new_node`.
+                    let mut added_regions = associated_regions.clone();
                     if is_forward {
                         added_regions.intersect(&self.forward_regions);
                     } else {
                         added_regions.intersect(&self.backward_regions);
                     }
 
-                    self.remove_dead_regions(location, &mut added_regions);
                     self.remove_dead_regions(new_location, &mut added_regions);
+
                     if let Some(time_travellers) = time_travellers {
                         added_regions.union(time_travellers);
                     }
 
                     added_regions.subtract(&new_node.associated_regions);
 
-                    let mut new_has_changed = false;
                     if !added_regions.is_empty() {
                         if let Some(already_added_regions) = new_node.added_regions.as_mut() {
                             already_added_regions.union(&added_regions);
                         } else {
                             new_node.added_regions = Some(added_regions);
                         }
-                        new_has_changed = true;
+                        new_node_changed = true;
                     }
-                    if is_forward && successor_reachable_by_loan && !new_node.reachable_by_loan {
-                        new_node.reachable_by_loan = true;
-                        new_has_changed = true;
-                    }
-                    if new_has_changed && !new_node.added_to_stack {
+
+                    if new_node_changed && !new_node.added_to_stack {
                         stack.push(new_location);
                         new_node.added_to_stack = true;
                     }
