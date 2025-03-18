@@ -13,7 +13,7 @@ use rustc_index::bit_set::thin_bit_set::{SparseBitMatrix, ThinBitSet};
 use rustc_index::{Idx, IndexVec};
 use rustc_middle::mir::{self, BasicBlock, Body, Location, Place, Statement, Terminator};
 use rustc_middle::ty::TyCtxt;
-use rustc_mir_dataflow::points::{DenseLocationMap, PointIndex};
+use rustc_mir_dataflow::points::DenseLocationMap;
 use smallvec::{SmallVec, smallvec};
 
 use super::ConstraintDirection;
@@ -260,6 +260,8 @@ struct LoanRegionNode {
     /// Whether this location is reachable by forward edges from the loan's introduction point in
     /// the localized constraint graph.
     reachable_by_loan: bool,
+    /// Whether the loan is in scope at this point.
+    in_scope: bool,
     /// Whether this node has been added to the stack for processing.
     added_to_stack: bool,
 }
@@ -267,17 +269,10 @@ struct LoanRegionNode {
 struct ScopeComputation {
     nodes: FxHashMap<Location, LoanRegionNode>,
     stack: Vec<Location>,
-
-    /// A set op points where we definitely know that the loan is in scope.
-    in_scope: ThinBitSet<PointIndex>,
 }
 
 impl ScopeComputation {
-    fn new(
-        regioncx: &RegionInferenceContext<'_>,
-        location_map: &DenseLocationMap,
-        borrow: &BorrowData<'_>,
-    ) -> Self {
+    fn new(regioncx: &RegionInferenceContext<'_>, borrow: &BorrowData<'_>) -> Self {
         // Put the loan's initial region in a set.
         let mut initial_region_set = new_empty_region_set(regioncx);
         initial_region_set.insert(borrow.region);
@@ -289,14 +284,11 @@ impl ScopeComputation {
                 associated_regions: new_empty_region_set(regioncx),
                 added_regions: Some(initial_region_set),
                 reachable_by_loan: false,
+                in_scope: false,
                 added_to_stack: true,
             },
         );
-        Self {
-            stack: vec![borrow.reserve_location],
-            nodes,
-            in_scope: ThinBitSet::new_empty(location_map.num_points()),
-        }
+        Self { stack: vec![borrow.reserve_location], nodes }
     }
 }
 
@@ -455,9 +447,10 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
             return false;
         }
 
-        let point = self.location_map.point_from_location(location);
-        if let Some(scope_computation) = self.scope_computations.borrow().get(&borrow_idx) {
-            return scope_computation.in_scope.contains(point);
+        if let Some(node) =
+            self.scope_computations.borrow().get(&borrow_idx).and_then(|x| x.nodes.get(&location))
+        {
+            return node.in_scope;
         }
 
         // Check if the loan is killed anywhere between its reserve location and `location`.
@@ -465,16 +458,16 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
             return false;
         };
 
-        self.compute_loan_scope(borrow_idx, point)
+        self.compute_loan_scope(borrow_idx, location)
     }
 
-    fn compute_loan_scope(&mut self, loan_idx: BorrowIndex, point: PointIndex) -> bool {
+    fn compute_loan_scope(&mut self, loan_idx: BorrowIndex, target_location: Location) -> bool {
         let loan_data = &self.borrow_set[loan_idx];
 
         let mut scope_computations = self.scope_computations.borrow_mut();
-        let ScopeComputation { stack, nodes, in_scope } = scope_computations
+        let ScopeComputation { stack, nodes } = scope_computations
             .entry(loan_idx)
-            .or_insert_with(|| ScopeComputation::new(self.regioncx, self.location_map, loan_data));
+            .or_insert_with(|| ScopeComputation::new(self.regioncx, loan_data));
 
         while let Some(location) = stack.pop() {
             let point = self.location_map.point_from_location(location);
@@ -492,6 +485,7 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                 associated_regions,
                 added_regions,
                 reachable_by_loan,
+                in_scope,
                 added_to_stack,
             } = nodes.get_mut(&location).unwrap();
             let reachable_by_loan = *reachable_by_loan; // Make copy.
@@ -550,7 +544,7 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                 let mut associated_regions = associated_regions.clone();
                 self.remove_dead_regions(location, &mut associated_regions);
                 if reachable_by_loan && !associated_regions.is_empty() {
-                    in_scope.insert(point);
+                    *in_scope = true;
                     my_println!("    In scope at {location:?}");
                 }
             }
@@ -565,6 +559,9 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
             let successor_reachable_by_loan =
                 !is_kill && reachable_by_loan || location == loan_data.reserve_location;
 
+            // FIXME: Is this necessary?
+            let in_scope = *in_scope;
+
             // Make copies of `associated_regions` as that borrow will be killed soon.
             let mut forward_regions = associated_regions.clone();
             let mut backward_regions = associated_regions.clone();
@@ -578,6 +575,7 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                         associated_regions: new_empty_region_set(self.regioncx),
                         added_regions: None,
                         reachable_by_loan: false,
+                        in_scope: false,
                         added_to_stack: false,
                     });
                 self.remove_dead_regions(location, &mut forward_regions);
@@ -616,6 +614,7 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                             associated_regions: new_empty_region_set(self.regioncx),
                             added_regions: None,
                             reachable_by_loan: false,
+                            in_scope: false,
                             added_to_stack: false,
                         });
                     self.remove_dead_regions(location, &mut forward_regions);
@@ -663,6 +662,7 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                         associated_regions: new_empty_region_set(self.regioncx),
                         added_regions: None,
                         reachable_by_loan: false,
+                        in_scope: false,
                         added_to_stack: false,
                     });
                 self.remove_dead_regions(location, &mut backward_regions);
@@ -698,6 +698,7 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                             associated_regions: new_empty_region_set(self.regioncx),
                             added_regions: None,
                             reachable_by_loan: false,
+                            in_scope: false,
                             added_to_stack: false,
                         });
                     self.remove_dead_regions(location, &mut backward_regions);
@@ -729,9 +730,13 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                     }
                 }
             }
+
+            if in_scope && location == target_location {
+                return true;
+            }
         }
 
-        in_scope.contains(point)
+        false
     }
 
     /// Remove dead regions from the set of associated regions.
