@@ -724,6 +724,15 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
 
     /// Returns `true` if the loan is killed before the successor location(s).
     fn is_kill(&self, borrow_idx: BorrowIndex, location: Location) -> bool {
+        // Check in `self.kills` first.
+        let polonius_block =
+            PoloniusBlock::from_location(self.body, &self.borrow_set[borrow_idx], location);
+        if let Some(Killed { statement_index }) =
+            self.kills[borrow_idx].get(polonius_block).and_then(|x| x.get())
+        {
+            return *statement_index == location.statement_index;
+        }
+
         if let Some(stmt) = self.body[location.block].statements.get(location.statement_index) {
             self.kill_at_stmt(borrow_idx, stmt)
         } else {
