@@ -809,21 +809,8 @@ impl<'a, 'tcx> ResultsVisitor<'a, 'tcx, Borrowck<'a, 'tcx>> for MirBorrowckCtxt<
             TerminatorKind::Yield { value: _, resume: _, resume_arg: _, drop: _ } => {
                 if self.movable_coroutine {
                     // Look for any active borrows to locals
-                    for (borrow_idx, _) in self.borrow_set.iter_enumerated() {
-                        let borrow_in_scope = if let Some(ref mut scopes_computer) =
-                            self.polonius_out_of_scope_computer
-                        {
-                            scopes_computer.loan_in_scope_at(borrow_idx, loc)
-                        } else {
-                            let borrows_in_scope = self.borrows_in_scope(loc, state);
-                            borrows_in_scope.contains(borrow_idx)
-                        };
-                        if !borrow_in_scope {
-                            continue;
-                        }
-
-                        let borrow = &self.borrow_set[borrow_idx];
-                        self.check_for_local_borrow(borrow, span);
+                    for (i, b) in self.borrow_set.iter_enumerated() {
+                        self.check_for_local_borrow(state, i, b, loc, span);
                     }
                 }
             }
@@ -836,21 +823,8 @@ impl<'a, 'tcx> ResultsVisitor<'a, 'tcx, Borrowck<'a, 'tcx>> for MirBorrowckCtxt<
                 // Often, the storage will already have been killed by an explicit
                 // StorageDead, but we don't always emit those (notably on unwind paths),
                 // so this "extra check" serves as a kind of backup.
-                for (borrow_idx, _) in self.borrow_set.iter_enumerated() {
-                    let borrow_in_scope = if let Some(ref mut scopes_computer) =
-                        self.polonius_out_of_scope_computer
-                    {
-                        scopes_computer.loan_in_scope_at(borrow_idx, loc)
-                    } else {
-                        let borrows_in_scope = self.borrows_in_scope(loc, state);
-                        borrows_in_scope.contains(borrow_idx)
-                    };
-                    if !borrow_in_scope {
-                        continue;
-                    }
-
-                    let borrow = &self.borrow_set[borrow_idx];
-                    self.check_for_invalidation_at_exit(loc, borrow, span);
+                for (i, b) in self.borrow_set.iter_enumerated() {
+                    self.check_for_invalidation_at_exit(state, i, b, loc, span);
                 }
             }
 
@@ -1202,6 +1176,25 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, '_, 'tcx> {
         error_reported
     }
 
+    /// Checks whether a borrow is in scope.
+    ///
+    /// If NLL is used, it will just check in `state.borrows`, but if Polonius is used it will ask
+    /// Polonius for a result. This might be a potentially expensive computation so you should not
+    /// call this method unless you have to.
+    fn borrow_in_scope_at(
+        &mut self,
+        state: &BorrowckDomain,
+        borrow_idx: BorrowIndex,
+        location: Location,
+    ) -> bool {
+        if let Some(ref mut scopes_computer) = self.polonius_out_of_scope_computer {
+            scopes_computer.loan_in_scope_at(borrow_idx, location)
+        } else {
+            let borrows_in_scope = self.borrows_in_scope(location, state);
+            borrows_in_scope.contains(borrow_idx)
+        }
+    }
+
     /// Encapsulates the idea of iterating over every borrow that involves a particular path
     fn each_borrow_involving_path(
         &mut self,
@@ -1236,20 +1229,7 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, '_, 'tcx> {
             }
 
             // Check if the loan is in scope.
-            let loan_in_scope =
-                if let Some(ref mut scopes_computer) = self.polonius_out_of_scope_computer {
-                    let top_down_answer = scopes_computer.loan_in_scope_at(borrow_idx, location);
-                    /*let bottom_up_answer = self.borrows_in_scope(location, state).contains(borrow_idx);
-                    assert_eq!(
-                        top_down_answer, bottom_up_answer,
-                        "Top down gives different answer at {borrow_idx:?} {location:?}"
-                    );*/
-                    top_down_answer
-                } else {
-                    let borrows_in_scope = self.borrows_in_scope(location, state);
-                    borrows_in_scope.contains(borrow_idx)
-                };
-            if !loan_in_scope {
+            if !self.borrow_in_scope_at(state, borrow_idx, location) {
                 continue;
             }
 
@@ -1650,8 +1630,10 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, '_, 'tcx> {
     #[instrument(level = "debug", skip(self))]
     fn check_for_invalidation_at_exit(
         &mut self,
-        location: Location,
+        state: &BorrowckDomain,
+        borrow_idx: BorrowIndex,
         borrow: &BorrowData<'tcx>,
+        location: Location,
         span: Span,
     ) {
         let place = borrow.borrowed_place;
@@ -1689,7 +1671,8 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, '_, 'tcx> {
             root_place,
             sd,
             places_conflict::PlaceConflictBias::Overlap,
-        ) {
+        ) && self.borrow_in_scope_at(state, borrow_idx, location)
+        {
             debug!("check_for_invalidation_at_exit({:?}): INVALID", place);
             // FIXME: should be talking about the region lifetime instead
             // of just a span here.
@@ -1705,10 +1688,19 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, '_, 'tcx> {
 
     /// Reports an error if this is a borrow of local data.
     /// This is called for all Yield expressions on movable coroutines
-    fn check_for_local_borrow(&mut self, borrow: &BorrowData<'tcx>, yield_span: Span) {
+    fn check_for_local_borrow(
+        &mut self,
+        state: &BorrowckDomain,
+        borrow_idx: BorrowIndex,
+        borrow: &BorrowData<'tcx>,
+        location: Location,
+        yield_span: Span,
+    ) {
         debug!("check_for_local_borrow({:?})", borrow);
 
-        if borrow_of_local_data(borrow.borrowed_place) {
+        if borrow_of_local_data(borrow.borrowed_place)
+            && self.borrow_in_scope_at(state, borrow_idx, location)
+        {
             let err = self.cannot_borrow_across_coroutine_yield(
                 self.retrieve_borrow_spans(borrow).var_or_use(),
                 yield_span,
