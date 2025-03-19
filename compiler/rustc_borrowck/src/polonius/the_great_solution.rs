@@ -2,7 +2,6 @@
 #![deny(unused_imports)]
 mod constraints;
 mod loan_invalidations;
-use std::cell::{OnceCell, RefCell};
 use std::collections::BTreeMap;
 use std::sync::LazyLock;
 
@@ -48,20 +47,14 @@ macro_rules! my_print {
 }
 pub(crate) use my_print;
 
+type KillsCache = IndexVec<PoloniusBlock, Option<KillAtBlock>>;
+
 pub(crate) struct PoloniusOutOfScopePrecomputer<'a, 'tcx> {
-    /// A set of the loans that has been checked.
-    checked_loans: ThinBitSet<BorrowIndex>,
+    pcx: PoloniusContext<'a, 'tcx>,
+    borrows: IndexVec<BorrowIndex, Option<PoloniusBorrowData>>,
+}
 
-    /// A cache for remembering which loans should be ignored.
-    ///
-    /// We have three scenarios:
-    /// - A loan is not in `self.checked_loans`: Then we don't know if it should be ignored and we
-    ///   need to compute it.
-    /// - The loan is in `self.checked_loans` but not in this set: Then the loan should not be
-    ///   ignored.
-    /// - The loan is in `self.checked_loans` and in this set: Then the loan should be ignored.
-    ignored_loans: ThinBitSet<BorrowIndex>,
-
+pub(crate) struct PoloniusContext<'a, 'tcx> {
     /// All regions that flows forward.
     forward_regions: ThinBitSet<RegionVid>,
     /// All regions that flows backward.
@@ -108,17 +101,28 @@ pub(crate) struct PoloniusOutOfScopePrecomputer<'a, 'tcx> {
     // `SmallVec`. Maybe that should be replaced by this.
     adjacent_predecessors: IndexVec<BasicBlock, ThinBitSet<BasicBlock>>,
 
-    /// Information of when loan's are killed.
-    kills: IndexVec<BorrowIndex, IndexVec<PoloniusBlock, OnceCell<KillAtBlock>>>,
-
-    // FIXME: Find better names.
-    scope_computations: RefCell<FxHashMap<BorrowIndex, ScopeComputation>>,
-
     tcx: TyCtxt<'tcx>,
     regioncx: &'a RegionInferenceContext<'tcx>,
     body: &'a Body<'tcx>,
     location_map: &'a DenseLocationMap,
     borrow_set: &'a BorrowSet<'tcx>,
+}
+
+#[derive(Copy, Clone)]
+struct BorrowContext<'a, 'tcx> {
+    pcx: &'a PoloniusContext<'a, 'tcx>,
+    borrow_idx: BorrowIndex,
+    borrow: &'a BorrowData<'tcx>,
+}
+
+enum PoloniusBorrowData {
+    /// This borrow should be ignored.
+    Ignored,
+
+    Data {
+        kills_cache: KillsCache,
+        scope_computation: ScopeComputation,
+    },
 }
 
 rustc_index::newtype_index! {
@@ -157,24 +161,24 @@ impl PoloniusBlock {
 
     /// Get the "introduction block". I.E the first block where the loan is introduced.
     #[inline]
-    fn introduction_block(borrow: &BorrowData<'_>) -> Self {
-        Self::from_basic_block(borrow.reserve_location.block)
+    fn introduction_block(bcx: BorrowContext<'_, '_>) -> Self {
+        Self::from_basic_block(bcx.borrow.reserve_location.block)
     }
 
     /// Get the "before introduction block". I.E the block consisting of statements up to and
     /// including the loan's reserve location.
     #[inline]
-    fn before_introduction_block(body: &Body<'_>) -> Self {
-        Self::from_usize(body.basic_blocks.len())
+    fn before_introduction_block(bcx: BorrowContext<'_, '_>) -> Self {
+        Self::from_usize(bcx.pcx.body.basic_blocks.len())
     }
 
     /// Get the correct block from a loan and a location.
     #[inline]
-    fn from_location(body: &Body<'_>, borrow: &BorrowData<'_>, location: Location) -> Self {
-        if location.block == borrow.reserve_location.block
-            && location.statement_index <= borrow.reserve_location.statement_index
+    fn from_location(bcx: BorrowContext<'_, '_>, location: Location) -> Self {
+        if location.block == bcx.borrow.reserve_location.block
+            && location.statement_index <= bcx.borrow.reserve_location.statement_index
         {
-            Self::before_introduction_block(body)
+            Self::before_introduction_block(bcx)
         } else {
             Self::from_basic_block(location.block)
         }
@@ -182,15 +186,15 @@ impl PoloniusBlock {
 
     /// Returns the number of polonius blocks. THat is, the number of blocks + 1.
     #[inline]
-    fn num_blocks(body: &Body<'_>) -> usize {
-        body.basic_blocks.len() + 1
+    fn num_blocks(bcx: BorrowContext<'_, '_>) -> usize {
+        bcx.pcx.body.basic_blocks.len() + 1
     }
 
     /// Get the [`BasicBlock`] containing this [`PoloniusBlock``].
     #[inline]
-    fn basic_block(self, body: &Body<'_>, borrow: &BorrowData<'_>) -> BasicBlock {
-        if self.as_usize() == body.basic_blocks.len() {
-            borrow.reserve_location.block
+    fn basic_block(self, bcx: BorrowContext<'_, '_>) -> BasicBlock {
+        if self.as_usize() == bcx.pcx.body.basic_blocks.len() {
+            bcx.borrow.reserve_location.block
         } else {
             BasicBlock::from_u32(self.as_u32())
         }
@@ -199,23 +203,23 @@ impl PoloniusBlock {
     /// Check if this is the "introduction block". I.E the block immediately after the loan has been
     /// introduced.
     #[inline]
-    fn is_introduction_block(self, borrow: &BorrowData<'_>) -> bool {
-        self.as_u32() == borrow.reserve_location.block.as_u32()
+    fn is_introduction_block(self, bcx: BorrowContext<'_, '_>) -> bool {
+        self.as_u32() == bcx.borrow.reserve_location.block.as_u32()
     }
 
     /// Check if this is the "before introduction block". I.E the block containing statements up to
     /// and including the loan's reserve location.
     #[inline]
-    fn is_before_introduction_block(self, body: &Body<'_>) -> bool {
-        self.as_usize() == body.basic_blocks.len()
+    fn is_before_introduction_block(self, bcx: BorrowContext<'_, '_>) -> bool {
+        self.as_usize() == bcx.pcx.body.basic_blocks.len()
     }
 
     /// Get the index of the first statement in this block. This will be 0 except for the
     /// introduction block.
     #[inline]
-    fn first_index(self, borrow: &BorrowData<'_>) -> usize {
-        if self.is_introduction_block(borrow) {
-            borrow.reserve_location.statement_index + 1
+    fn first_index(self, bcx: BorrowContext<'_, '_>) -> usize {
+        if self.is_introduction_block(bcx) {
+            bcx.borrow.reserve_location.statement_index + 1
         } else {
             0
         }
@@ -224,11 +228,11 @@ impl PoloniusBlock {
     /// Get the last statement index for this block. For all blocks except the "before introduction
     /// block", this will point to a terminator, not a statement.
     #[inline]
-    fn last_index(self, body: &Body<'_>, borrow: &BorrowData<'_>) -> usize {
-        if !self.is_before_introduction_block(body) {
-            body.basic_blocks[self.basic_block(body, borrow)].statements.len()
+    fn last_index(self, bcx: BorrowContext<'_, '_>) -> usize {
+        if !self.is_before_introduction_block(bcx) {
+            bcx.pcx.body.basic_blocks[self.basic_block(bcx)].statements.len()
         } else {
-            borrow.reserve_location.statement_index
+            bcx.borrow.reserve_location.statement_index
         }
     }
 
@@ -239,19 +243,20 @@ impl PoloniusBlock {
     #[inline]
     fn successors(
         self,
-        body: &Body<'_>,
-        borrow: &BorrowData<'_>,
+        bcx: BorrowContext<'_, '_>,
     ) -> impl DoubleEndedIterator<Item = PoloniusBlock> {
-        if !self.is_before_introduction_block(body) {
-            Either::Left(body[self.basic_block(body, borrow)].terminator().successors().map(|bb| {
-                if bb == borrow.reserve_location.block {
-                    Self::before_introduction_block(body)
-                } else {
-                    Self::from_basic_block(bb)
-                }
-            }))
+        if !self.is_before_introduction_block(bcx) {
+            Either::Left(bcx.pcx.body[self.basic_block(bcx)].terminator().successors().map(
+                move |bb| {
+                    if bb == bcx.borrow.reserve_location.block {
+                        Self::before_introduction_block(bcx)
+                    } else {
+                        Self::from_basic_block(bb)
+                    }
+                },
+            ))
         } else {
-            Either::Right([Self::introduction_block(borrow)].into_iter())
+            Either::Right([Self::introduction_block(bcx)].into_iter())
         }
     }
 }
@@ -274,27 +279,6 @@ struct ScopeComputation {
     is_finished: bool,
 }
 
-impl ScopeComputation {
-    fn new(regioncx: &RegionInferenceContext<'_>, borrow: &BorrowData<'_>) -> Self {
-        // Put the loan's initial region in a set.
-        let mut initial_region_set = new_empty_region_set(regioncx);
-        initial_region_set.insert(borrow.region);
-
-        let mut nodes = FxHashMap::default();
-        nodes.insert(
-            borrow.reserve_location,
-            LoanRegionNode {
-                associated_regions: new_empty_region_set(regioncx),
-                added_regions: Some(initial_region_set),
-                reachable_by_loan: false,
-                in_scope: false,
-                added_to_stack: true,
-            },
-        );
-        Self { stack: vec![borrow.reserve_location], nodes, is_finished: false }
-    }
-}
-
 /// Information of when/if a loan is killed at a block.
 #[derive(Debug, Copy, Clone)]
 enum KillAtBlock {
@@ -306,7 +290,7 @@ enum KillAtBlock {
 }
 use KillAtBlock::*;
 
-impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
+impl<'a, 'tcx> PoloniusContext<'a, 'tcx> {
     pub(crate) fn new(
         tcx: TyCtxt<'tcx>,
         regioncx: &'a RegionInferenceContext<'tcx>,
@@ -315,28 +299,7 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
         borrow_set: &'a BorrowSet<'tcx>,
         live_region_variances: &'a BTreeMap<RegionVid, ConstraintDirection>,
     ) -> Self {
-        my_println!(
-            "Universal: {:?}",
-            regioncx.universal_regions().universal_regions_iter().collect::<Vec<RegionVid>>()
-        );
-
-        // FIXME: Only for debugging.
-        my_print!("    Live regions:");
-        for region in regioncx.liveness_constraints().regions() {
-            my_println!(
-                "  {:?}: {:?}",
-                region,
-                regioncx
-                    .liveness_constraints()
-                    .points()
-                    .row(region)
-                    .iter()
-                    .flat_map(|pts| pts.iter())
-                    .map(|x| regioncx.liveness_constraints().location_from_point(x))
-                    .collect::<Vec<_>>()
-            );
-        }
-
+        // Collect forward and backward regions.
         let mut forward_regions = new_empty_region_set(regioncx);
         let mut backward_regions = forward_regions.clone();
         for region in (0..num_regions(regioncx)).map(RegionVid::from_usize) {
@@ -355,9 +318,6 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                 }
             }
         }
-        my_println!("Forward regions: {:?}", forward_regions);
-        my_println!("Backward regions: {:?}", backward_regions);
-        my_println!("Live region variances: {:?}", live_region_variances);
 
         let mut constraints = Constraints::new(tcx, regioncx, body, location_map);
         for constraint in regioncx.outlives_constraints() {
@@ -410,15 +370,11 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
         }
 
         Self {
-            checked_loans: ThinBitSet::new_empty(borrow_set.len()),
-            ignored_loans: ThinBitSet::new_empty(borrow_set.len()),
             constraints,
             forward_regions,
             backward_regions,
             transitive_predecessors,
             adjacent_predecessors,
-            kills: IndexVec::from_elem_n(IndexVec::new(), borrow_set.len()),
-            scope_computations: RefCell::new(FxHashMap::default()),
             tcx,
             regioncx,
             body,
@@ -427,66 +383,254 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
         }
     }
 
+    /// Returns `true` iff `a` is earlier in the control flow graph than `b`.
+    #[inline]
+    fn is_predecessor(&self, a: Location, b: Location) -> bool {
+        a.block == b.block && a.statement_index < b.statement_index
+            || self.transitive_predecessors[b.block].contains(a.block)
+    }
+}
+
+impl<'a, 'tcx> BorrowContext<'a, 'tcx> {
+    /// Construct a new empty set with capacity for [`PoloniusBlock`]s.
+    fn new_polonius_block_set(self) -> ThinBitSet<PoloniusBlock> {
+        ThinBitSet::new_empty(PoloniusBlock::num_blocks(self))
+    }
+}
+
+impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
+    pub(crate) fn new(
+        tcx: TyCtxt<'tcx>,
+        regioncx: &'a RegionInferenceContext<'tcx>,
+        body: &'a Body<'tcx>,
+        location_map: &'a DenseLocationMap,
+        borrow_set: &'a BorrowSet<'tcx>,
+        live_region_variances: &'a BTreeMap<RegionVid, ConstraintDirection>,
+    ) -> Self {
+        Self {
+            pcx: PoloniusContext::new(
+                tcx,
+                regioncx,
+                body,
+                location_map,
+                borrow_set,
+                live_region_variances,
+            ),
+            borrows: IndexVec::new(),
+        }
+    }
+
     /// Check if a loan is in scope at a location.
     pub(crate) fn loan_in_scope_at(&mut self, borrow_idx: BorrowIndex, location: Location) -> bool {
-        let borrow = &self.borrow_set[borrow_idx];
+        let bcx =
+            BorrowContext { pcx: &self.pcx, borrow_idx, borrow: &self.pcx.borrow_set[borrow_idx] };
 
-        // Check if this borrow is ignored.
-        if !self.checked_loans.insert(borrow_idx) {
-            // This loan has been checked before so we have already computed if it should be ignored
-            // or not.
-            if self.ignored_loans.contains(borrow_idx) {
-                return false;
+        let maybe_borrow_data = self.borrows.ensure_contains_elem(borrow_idx, || None);
+        match maybe_borrow_data {
+            Some(PoloniusBorrowData::Ignored) => return false,
+            Some(PoloniusBorrowData::Data { .. }) => (),
+            None => {
+                // Check if this borrow is ignored.
+                if bcx.borrow.borrowed_place().ignore_borrow(
+                    self.pcx.tcx,
+                    self.pcx.body,
+                    &self.pcx.borrow_set.locals_state_at_exit,
+                ) {
+                    *maybe_borrow_data = Some(PoloniusBorrowData::Ignored);
+                    return false;
+                }
+
+                *maybe_borrow_data = Some(PoloniusBorrowData::Data {
+                    kills_cache: IndexVec::new(),
+                    scope_computation: ScopeComputation::new(bcx),
+                });
             }
-        } else if borrow.borrowed_place().ignore_borrow(
-            self.tcx,
-            self.body,
-            &self.borrow_set.locals_state_at_exit,
-        ) {
-            self.ignored_loans.insert(borrow_idx);
-            return false;
-        }
+        };
+
+        let Some(PoloniusBorrowData::Data { kills_cache, scope_computation }) = maybe_borrow_data
+        else {
+            unreachable!()
+        };
 
         // Check if this location can never be reached by the borrow.
-        if !self.is_predecessor(borrow.reserve_location(), location) {
+        if !self.pcx.is_predecessor(bcx.borrow.reserve_location(), location) {
             return false;
         }
 
         // Check if we have already computed an "in scope-value" for location.
-        if let Some(scope_computation) = self.scope_computations.borrow().get(&borrow_idx) {
-            if scope_computation.is_finished {
-                // If the scope computation is finished, it's appropriate to return `false` if no
-                // node for the location exists.
-                return scope_computation.nodes.get(&location).is_some_and(|x| x.in_scope);
+        if scope_computation.is_finished {
+            // If the scope computation is finished, it's appropriate to return `false` if no
+            // node for the location exists.
+            return scope_computation.nodes.get(&location).is_some_and(|x| x.in_scope);
 
-                // If the computation is not finished, we can only be sure if the `in_scope`-field
-                // has been set to `true` for the relevant node.
-            } else if scope_computation.nodes.get(&location).is_some_and(|x| x.in_scope) {
-                return true;
-            }
+            // If the computation is not finished, we can only be sure if the `in_scope`-field
+            // has been set to `true` for the relevant node.
+        } else if scope_computation.nodes.get(&location).is_some_and(|x| x.in_scope) {
+            return true;
         }
 
         // Check if the loan is killed anywhere between its reserve location and `location`.
-        let Some(_live_paths) = self.live_paths(borrow_idx, location) else {
+        let Some(_live_paths) = live_paths(bcx, kills_cache, location) else {
             return false;
         };
 
-        self.compute_loan_scope(borrow_idx, location)
+        scope_computation.compute(bcx, kills_cache, location)
+    }
+}
+
+/// Returns `true` if the loan is killed before the successor location(s).
+fn is_killed(bcx: BorrowContext<'_, '_>, kills_cache: &mut KillsCache, location: Location) -> bool {
+    let polonius_block = PoloniusBlock::from_location(bcx, location);
+
+    // Check if we already know the answer.
+    match kills_cache.get(polonius_block) {
+        Some(Some(Killed { statement_index })) => {
+            return *statement_index == location.statement_index;
+        }
+        Some(Some(NotKilled)) => return false,
+        Some(None) | None => (),
+    }
+    // The answer was not known so we have to compute it ourselfs.
+
+    let is_kill =
+        if let Some(stmt) = bcx.pcx.body[location.block].statements.get(location.statement_index) {
+            is_killed_at_stmt(bcx, stmt)
+        } else {
+            is_killed_at_terminator(bcx, &bcx.pcx.body[location.block].terminator())
+        };
+
+    // If we had a kill at this location, we should add it to the cache.
+    if is_kill {
+        *kills_cache.ensure_contains_elem(polonius_block, || None) =
+            Some(Killed { statement_index: location.statement_index });
     }
 
-    fn compute_loan_scope(&mut self, loan_idx: BorrowIndex, target_location: Location) -> bool {
-        let loan_data = &self.borrow_set[loan_idx];
+    is_kill
+}
 
-        let mut scope_computations = self.scope_computations.borrow_mut();
-        let ScopeComputation { stack, nodes, is_finished } = scope_computations
-            .entry(loan_idx)
-            .or_insert_with(|| ScopeComputation::new(self.regioncx, loan_data));
+/// Calculate when/if a loan goes out of scope for a set of statements in a block.
+fn is_killed_at_block(
+    bcx: BorrowContext<'_, '_>,
+    kills_cache: &mut KillsCache,
+    block: PoloniusBlock,
+) -> bool {
+    let res = kills_cache.get_or_insert_with(block, || {
+        let block_data = &bcx.pcx.body[block.basic_block(bcx)];
+        for statement_index in block.first_index(bcx)..=block.last_index(bcx) {
+            let is_killed = if let Some(stmt) = block_data.statements.get(statement_index) {
+                is_killed_at_stmt(bcx, stmt)
+            } else {
+                is_killed_at_terminator(bcx, &block_data.terminator())
+            };
 
-        debug_assert!(!*is_finished);
+            if is_killed {
+                return Killed { statement_index };
+            }
+        }
 
-        while let Some(location) = stack.pop() {
-            let point = self.location_map.point_from_location(location);
-            let block_data = &self.body[location.block];
+        NotKilled
+    });
+
+    matches!(res, Killed { .. })
+}
+
+/// Given that the borrow was in scope on entry to this statement, check if it goes out of scope
+/// till the next location.
+#[inline]
+fn is_killed_at_stmt<'tcx>(bcx: BorrowContext<'_, 'tcx>, stmt: &Statement<'tcx>) -> bool {
+    match &stmt.kind {
+        mir::StatementKind::Assign(box (lhs, _rhs)) => kill_on_place(bcx, *lhs),
+        mir::StatementKind::StorageDead(local) => {
+            bcx.pcx.borrow_set.local_map.get(local).is_some_and(|bs| bs.contains(&bcx.borrow_idx))
+        }
+        _ => false,
+    }
+}
+
+/// Given that the borrow was in scope on entry to this terminator, check if it goes out of scope
+/// till the succeeding blocks.
+#[inline]
+fn is_killed_at_terminator<'tcx>(
+    bcx: BorrowContext<'_, 'tcx>,
+    terminator: &Terminator<'tcx>,
+) -> bool {
+    match &terminator.kind {
+        // A `Call` terminator's return value can be a local which has borrows, so we need to record
+        // those as killed as well.
+        mir::TerminatorKind::Call { destination, .. } => kill_on_place(bcx, *destination),
+        mir::TerminatorKind::InlineAsm { operands, .. } => operands.iter().any(|op| {
+            if let mir::InlineAsmOperand::Out { place: Some(place), .. }
+            | mir::InlineAsmOperand::InOut { out_place: Some(place), .. } = op
+            {
+                kill_on_place(bcx, *place)
+            } else {
+                false
+            }
+        }),
+        _ => false,
+    }
+}
+
+#[inline]
+fn kill_on_place<'tcx>(bcx: BorrowContext<'_, 'tcx>, place: Place<'tcx>) -> bool {
+    bcx.pcx.borrow_set.local_map.get(&place.local).is_some_and(|bs| bs.contains(&bcx.borrow_idx))
+        && if place.projection.is_empty() {
+            !bcx.pcx.body.local_decls[place.local].is_ref_to_static()
+        } else {
+            places_conflict(
+                bcx.pcx.tcx,
+                bcx.pcx.body,
+                bcx.borrow.borrowed_place,
+                place,
+                PlaceConflictBias::NoOverlap,
+            )
+        }
+}
+
+/// Remove dead regions from the set of associated regions.
+fn remove_dead_regions(
+    pcx: &PoloniusContext<'_, '_>,
+    location: Location,
+    region_set: &mut ThinBitSet<RegionVid>,
+) {
+    for region in region_set.clone().iter() {
+        if !pcx.regioncx.liveness_constraints().is_live_at(region, location) {
+            region_set.remove(region);
+        }
+    }
+}
+
+impl ScopeComputation {
+    fn new(bcx: BorrowContext<'_, '_>) -> Self {
+        // Put the loan's initial region in a set.
+        let mut initial_region_set = new_empty_region_set(bcx.pcx.regioncx);
+        initial_region_set.insert(bcx.borrow.region);
+
+        let mut nodes = FxHashMap::default();
+        nodes.insert(
+            bcx.borrow.reserve_location,
+            LoanRegionNode {
+                associated_regions: new_empty_region_set(bcx.pcx.regioncx),
+                added_regions: Some(initial_region_set),
+                reachable_by_loan: false,
+                in_scope: false,
+                added_to_stack: true,
+            },
+        );
+        Self { stack: vec![bcx.borrow.reserve_location], nodes, is_finished: false }
+    }
+
+    fn compute(
+        &mut self,
+        bcx: BorrowContext<'_, '_>,
+        kills_cache: &mut KillsCache,
+        target_location: Location,
+    ) -> bool {
+        debug_assert!(!self.is_finished);
+
+        while let Some(location) = self.stack.pop() {
+            let point = bcx.pcx.location_map.point_from_location(location);
+            let block_data = &bcx.pcx.body[location.block];
 
             // Debugging: Print the current location and statement/expression.
             if let Some(stmt) = block_data.statements.get(location.statement_index) {
@@ -502,7 +646,7 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                 reachable_by_loan,
                 in_scope,
                 added_to_stack,
-            } = nodes.get_mut(&location).unwrap();
+            } = self.nodes.get_mut(&location).unwrap();
             let reachable_by_loan = *reachable_by_loan; // Make copy.
 
             debug_assert!(*added_to_stack);
@@ -517,7 +661,7 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
 
                 // Add constraints.
                 let time_travelling_regions =
-                    self.constraints.add_dependent_regions_at_point(point, &mut added_regions);
+                    bcx.pcx.constraints.add_dependent_regions_at_point(point, &mut added_regions);
                 if let Some(tf) = &time_travelling_regions.to_next_loc {
                     my_println!("    Forward time travellers: {:?}", tf);
                 }
@@ -542,7 +686,7 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                 if reachable_by_loan {
                     // FIXME: This is just a hack.
                     let mut associated_regions = associated_regions.clone();
-                    self.remove_dead_regions(location, &mut associated_regions);
+                    remove_dead_regions(bcx.pcx, location, &mut associated_regions);
                     if associated_regions.is_empty() {
                         my_println!("  Loan killed.");
                         continue;
@@ -555,37 +699,39 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
             };
 
             let mut associated_regions = associated_regions.clone();
-            self.remove_dead_regions(location, &mut associated_regions);
+            remove_dead_regions(bcx.pcx, location, &mut associated_regions);
             if reachable_by_loan && !associated_regions.is_empty() {
                 *in_scope = true;
                 my_println!("    In scope at {location:?}");
             }
 
             // Check if the loan is killed.
-            let is_kill = self.is_kill(loan_idx, location);
+            let is_killed = is_killed(bcx, kills_cache, location);
 
-            if is_kill && reachable_by_loan {
+            if is_killed && reachable_by_loan {
                 continue;
             }
 
             let successor_reachable_by_loan =
-                !is_kill && reachable_by_loan || location == loan_data.reserve_location;
+                !is_killed && reachable_by_loan || location == bcx.borrow.reserve_location;
 
             // Necessary to make the borrow checker happy.
             let in_scope = *in_scope;
 
-            self.visit_adjacent_locations(
+            visit_adjacent_locations(
+                bcx.pcx,
                 block_data,
                 location,
                 time_travelling_regions,
                 |new_location, time_travellers, is_forward| {
-                    let new_node = nodes.entry(new_location).or_insert_with(|| LoanRegionNode {
-                        associated_regions: new_empty_region_set(self.regioncx),
-                        added_regions: None,
-                        reachable_by_loan: false,
-                        in_scope: false,
-                        added_to_stack: false,
-                    });
+                    let new_node =
+                        self.nodes.entry(new_location).or_insert_with(|| LoanRegionNode {
+                            associated_regions: new_empty_region_set(bcx.pcx.regioncx),
+                            added_regions: None,
+                            reachable_by_loan: false,
+                            in_scope: false,
+                            added_to_stack: false,
+                        });
 
                     // Keep track of whether `new_node` has changed.
                     let mut new_node_changed = false;
@@ -601,12 +747,12 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                     // Check if any regions should be added to `new_node`.
                     let mut added_regions = associated_regions.clone();
                     if is_forward {
-                        added_regions.intersect(&self.forward_regions);
+                        added_regions.intersect(&bcx.pcx.forward_regions);
                     } else {
-                        added_regions.intersect(&self.backward_regions);
+                        added_regions.intersect(&bcx.pcx.backward_regions);
                     }
 
-                    self.remove_dead_regions(new_location, &mut added_regions);
+                    remove_dead_regions(bcx.pcx, new_location, &mut added_regions);
 
                     if let Some(time_travellers) = time_travellers {
                         added_regions.union(time_travellers);
@@ -624,7 +770,7 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                     }
 
                     if new_node_changed && !new_node.added_to_stack {
-                        stack.push(new_location);
+                        self.stack.push(new_location);
                         new_node.added_to_stack = true;
                     }
                 },
@@ -635,265 +781,136 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
             }
         }
 
-        *is_finished = true;
-        nodes.get(&target_location).is_some_and(|x| x.in_scope)
+        self.is_finished = true;
+        self.nodes.get(&target_location).is_some_and(|x| x.in_scope)
     }
+}
 
-    #[inline]
-    fn visit_adjacent_locations(
-        &self,
-        block_data: &BasicBlockData<'tcx>,
-        location: Location,
-        maybe_time_travellers: Option<TimeTravellingRegions>,
-        mut op: impl FnMut(Location, Option<&ThinBitSet<RegionVid>>, bool),
-    ) {
-        // Forwards:
-        if location.statement_index < block_data.statements.len() {
-            let successor_location = location.successor_within_block();
-            let time_travellers =
-                maybe_time_travellers.as_ref().and_then(|t| t.to_next_loc.as_ref());
+#[inline]
+fn visit_adjacent_locations(
+    pcx: &PoloniusContext<'_, '_>,
+    block_data: &BasicBlockData<'_>,
+    location: Location,
+    maybe_time_travellers: Option<TimeTravellingRegions>,
+    mut op: impl FnMut(Location, Option<&ThinBitSet<RegionVid>>, bool),
+) {
+    // Forwards:
+    if location.statement_index < block_data.statements.len() {
+        let successor_location = location.successor_within_block();
+        let time_travellers = maybe_time_travellers.as_ref().and_then(|t| t.to_next_loc.as_ref());
+        op(successor_location, time_travellers, true);
+    } else {
+        for successor_block in block_data.terminator().successors() {
+            let successor_location = Location { block: successor_block, statement_index: 0 };
+            let time_travellers = maybe_time_travellers
+                .as_ref()
+                .and_then(|t| t.to_successor_blocks.as_ref().and_then(|x| x.row(successor_block)));
             op(successor_location, time_travellers, true);
-        } else {
-            for successor_block in block_data.terminator().successors() {
-                let successor_location = Location { block: successor_block, statement_index: 0 };
-                let time_travellers = maybe_time_travellers.as_ref().and_then(|t| {
-                    t.to_successor_blocks.as_ref().and_then(|x| x.row(successor_block))
-                });
-                op(successor_location, time_travellers, true);
-            }
         }
+    }
 
-        // Backwards:
-        if location.statement_index > 0 {
-            let predecessor_location = location.predecessor_within_block();
-            let time_travellers =
-                maybe_time_travellers.as_ref().and_then(|t| t.to_prev_stmt.as_ref());
+    // Backwards:
+    if location.statement_index > 0 {
+        let predecessor_location = location.predecessor_within_block();
+        let time_travellers = maybe_time_travellers.as_ref().and_then(|t| t.to_prev_stmt.as_ref());
+        op(predecessor_location, time_travellers, false);
+    } else {
+        for &predecessor_block in &pcx.body.basic_blocks.predecessors()[location.block] {
+            let predecessor_location = Location {
+                block: predecessor_block,
+                statement_index: pcx.body[predecessor_block].statements.len(),
+            };
+            let time_travellers = maybe_time_travellers.as_ref().and_then(|t| {
+                t.to_predecessor_blocks.as_ref().and_then(|x| x.row(predecessor_block))
+            });
             op(predecessor_location, time_travellers, false);
-        } else {
-            for &predecessor_block in &self.body.basic_blocks.predecessors()[location.block] {
-                let predecessor_location = Location {
-                    block: predecessor_block,
-                    statement_index: self.body[predecessor_block].statements.len(),
-                };
-                let time_travellers = maybe_time_travellers.as_ref().and_then(|t| {
-                    t.to_predecessor_blocks.as_ref().and_then(|x| x.row(predecessor_block))
-                });
-                op(predecessor_location, time_travellers, false);
-            }
         }
     }
+}
 
-    /// Remove dead regions from the set of associated regions.
-    fn remove_dead_regions(&self, location: Location, region_set: &mut ThinBitSet<RegionVid>) {
-        for region in region_set.clone().iter() {
-            if !self.regioncx.liveness_constraints().is_live_at(region, location) {
-                region_set.remove(region);
-            }
-        }
-    }
+fn live_paths(
+    bcx: BorrowContext<'_, '_>,
+    kills_cache: &mut KillsCache,
+    destination: Location,
+) -> Option<ThinBitSet<PoloniusBlock>> {
+    // `destination_block` is the `PoloniusBlock` for `destination`.
+    let destination_block = PoloniusBlock::from_location(bcx, destination);
 
-    /// Returns `true` if the loan is killed before the successor location(s).
-    fn is_kill(&self, borrow_idx: BorrowIndex, location: Location) -> bool {
-        // Check in `self.kills` first.
-        let polonius_block =
-            PoloniusBlock::from_location(self.body, &self.borrow_set[borrow_idx], location);
-        if let Some(Killed { statement_index }) =
-            self.kills[borrow_idx].get(polonius_block).and_then(|x| x.get())
-        {
-            return *statement_index == location.statement_index;
-        }
-
-        if let Some(stmt) = self.body[location.block].statements.get(location.statement_index) {
-            self.kill_at_stmt(borrow_idx, stmt)
-        } else {
-            self.kill_at_terminator(borrow_idx, &self.body[location.block].terminator())
-        }
-    }
-
-    /// Calculate when/if a loan goes out of scope for a set of statements in a block.
-    #[inline]
-    fn kill_at_block(
-        &self,
-        borrow_idx: BorrowIndex,
-        block_idx: BasicBlock,
-        statements: impl IntoIterator<Item = usize>,
-    ) -> KillAtBlock {
-        let block = &self.body[block_idx];
-        if let Some(statement_index) = statements.into_iter().find(|&statement_idx| {
-            if let Some(stmt) = block.statements.get(statement_idx) {
-                self.kill_at_stmt(borrow_idx, stmt)
-            } else {
-                self.kill_at_terminator(borrow_idx, &block.terminator())
-            }
-        }) {
-            Killed { statement_index }
-        } else {
-            NotKilled
-        }
-    }
-
-    /// Given that the borrow was in scope on entry to this statement, check if it goes out of scope
-    /// till the next location.
-    #[inline]
-    fn kill_at_stmt(&self, borrow_idx: BorrowIndex, stmt: &Statement<'tcx>) -> bool {
-        match &stmt.kind {
-            mir::StatementKind::Assign(box (lhs, _rhs)) => self.kill_on_place(borrow_idx, *lhs),
-            mir::StatementKind::StorageDead(local) => {
-                self.borrow_set.local_map.get(local).is_some_and(|bs| bs.contains(&borrow_idx))
-            }
-            _ => false,
-        }
-    }
-
-    /// Given that the borrow was in scope on entry to this terminator, check if it goes out of scope
-    /// till the succeeding blocks.
-    #[inline]
-    fn kill_at_terminator(&self, borrow_idx: BorrowIndex, terminator: &Terminator<'tcx>) -> bool {
-        match &terminator.kind {
-            // A `Call` terminator's return value can be a local which has borrows, so we need to record
-            // those as killed as well.
-            mir::TerminatorKind::Call { destination, .. } => {
-                self.kill_on_place(borrow_idx, *destination)
-            }
-            mir::TerminatorKind::InlineAsm { operands, .. } => operands.iter().any(|op| {
-                if let mir::InlineAsmOperand::Out { place: Some(place), .. }
-                | mir::InlineAsmOperand::InOut { out_place: Some(place), .. } = op
-                {
-                    self.kill_on_place(borrow_idx, *place)
-                } else {
-                    false
-                }
-            }),
-            _ => false,
-        }
-    }
-
-    #[inline]
-    fn kill_on_place(&self, borrow_idx: BorrowIndex, place: Place<'tcx>) -> bool {
-        self.borrow_set.local_map.get(&place.local).is_some_and(|bs| bs.contains(&borrow_idx))
-            && if place.projection.is_empty() {
-                !self.body.local_decls[place.local].is_ref_to_static()
-            } else {
-                places_conflict(
-                    self.tcx,
-                    self.body,
-                    self.borrow_set[borrow_idx].borrowed_place,
-                    place,
-                    PlaceConflictBias::NoOverlap,
-                )
-            }
-    }
-
-    /// Returns `true` iff `a` is earlier in the control flow graph than `b`.
-    #[inline]
-    fn is_predecessor(&self, a: Location, b: Location) -> bool {
-        a.block == b.block && a.statement_index < b.statement_index
-            || self.transitive_predecessors[b.block].contains(a.block)
-    }
-
-    fn live_paths(
-        &mut self,
-        borrow_idx: BorrowIndex,
-        destination: Location,
-    ) -> Option<ThinBitSet<PoloniusBlock>> {
-        let borrow = &self.borrow_set[borrow_idx];
-        // `destination_block` is the `PoloniusBlock` for `destination`.
-        let destination_block = PoloniusBlock::from_location(self.body, borrow, destination);
-
-        // We begin by checking the relevant statements in `destination_block`.
-        // FIXME: Check in `self.kills` first.
-        if let Killed { .. } = self.kill_at_block(
-            borrow_idx,
-            destination.block,
-            destination_block.first_index(borrow)..destination.statement_index,
-        ) {
+    // We begin by checking the relevant statements in `destination_block`.
+    // FIXME: Is this the most efficient solution?
+    for statement_index in destination_block.first_index(bcx)..destination.statement_index {
+        let location = Location { block: destination.block, statement_index };
+        if is_killed(bcx, kills_cache, location) {
             return None;
         }
+    }
 
-        if destination_block.is_introduction_block(borrow) {
-            // We are finished.
-            return Some(ThinBitSet::new_empty(PoloniusBlock::num_blocks(self.body)));
+    if destination_block.is_introduction_block(bcx) {
+        // We are finished.
+        return Some(bcx.new_polonius_block_set());
+    }
+
+    // Traverse all blocks between `reserve_location` and `destination` in the CFG and check for
+    // kills. If there is no live path from `reserve_location` to `destination`, we no for sure
+    // that the loan is dead at `destination`.
+
+    // Keep track of all visited `PoloniusBlock`s.
+    let mut visited = bcx.new_polonius_block_set();
+
+    // The stack contains `(block, path)` pairs, where `block` is a `PoloniusBlock` and `path is
+    // a set of `PoloniusBlock`s making a path from `reserve_location` to `destination_block`.
+    // In this way we can record the live paths.
+    let introduction_block = PoloniusBlock::introduction_block(bcx);
+    let mut stack: SmallVec<[(PoloniusBlock, ThinBitSet<PoloniusBlock>); 4]> =
+        smallvec![(introduction_block, bcx.new_polonius_block_set())];
+    visited.insert(introduction_block);
+
+    let mut valid_paths = None;
+
+    while let Some((block, path)) = stack.pop() {
+        // Check if the loan is killed in this block.
+        if is_killed_at_block(bcx, kills_cache, block) {
+            continue;
         }
 
-        // Traverse all blocks between `reserve_location` and `destination` in the CFG and check for
-        // kills. If there is no live path from `reserve_location` to `destination`, we no for sure
-        // that the loan is dead at `destination`.
+        // Loop through all successors to `block` and follow those that are predecessors to
+        // `destination.block`.
+        for successor in block.successors(bcx) {
+            let successor_bb = successor.basic_block(bcx);
 
-        // Keep track of all visited `PoloniusBlock`s.
-        let mut visited = ThinBitSet::new_empty(PoloniusBlock::num_blocks(self.body));
+            if successor == destination_block {
+                // We have reached the destination so let's save this path.
+                valid_paths.get_or_insert_with(|| bcx.new_polonius_block_set()).union(&path);
 
-        // The stack contains `(block, path)` pairs, where `block` is a `PoloniusBlock` and `path is
-        // a set of `PoloniusBlock`s making a path from `reserve_location` to `destination_block`.
-        // In this way we can record the live paths.
-        let introduction_block = PoloniusBlock::introduction_block(borrow);
-        let mut stack: SmallVec<[(PoloniusBlock, ThinBitSet<PoloniusBlock>); 4]> = smallvec![(
-            introduction_block,
-            ThinBitSet::new_empty(PoloniusBlock::num_blocks(self.body))
-        )];
-        visited.insert(introduction_block);
-
-        let mut valid_paths = None;
-
-        while let Some((block, path)) = stack.pop() {
-            let basic_block = block.basic_block(self.body, borrow);
-
-            // Check if the loan is killed in this block.
-            self.kills[borrow_idx].ensure_contains_elem(block, OnceCell::new);
-            if let Killed { .. } = self.kills[borrow_idx][block].get_or_init(|| {
-                self.kill_at_block(
-                    borrow_idx,
-                    basic_block,
-                    block.first_index(borrow)..=block.last_index(self.body, borrow),
-                )
-            }) {
+                // We continue traversal to record all live paths.
                 continue;
             }
 
-            // Loop through all successors to `block` and follow those that are predecessors to
-            // `destination.block`.
-            for successor in block.successors(self.body, borrow) {
-                let successor_bb = successor.basic_block(self.body, borrow);
-
-                if successor == destination_block {
-                    // We have reached the destination so let's save this path.
-                    valid_paths
-                        .get_or_insert_with(|| {
-                            ThinBitSet::<PoloniusBlock>::new_empty(PoloniusBlock::num_blocks(
-                                self.body,
-                            ))
-                        })
-                        .union(&path);
-
-                    // We continue traversal to record all live paths.
-                    continue;
-                }
-
-                if !visited.insert(successor) {
-                    continue;
-                }
-
-                // Check that `successor` is a predecessor of `destination_block`.
-                //
-                // Given two `PoloniusBlock`s a and b, then a is a predecessor of b iff
-                // `a.basic_block()` is a predecessor of `b.basic_block()`, or a is the "before
-                // introduction block" and b is the "introduction block".
-                if !self.transitive_predecessors[destination.block].contains(successor_bb)
-                    || destination_block.is_introduction_block(borrow)
-                        && successor.is_before_introduction_block(self.body)
-                {
-                    // `successor` is not a predecessor of `destination_block`.
-                    continue;
-                }
-
-                // Push `successor` to `path`.
-                let mut path = path.clone();
-                path.insert(successor);
-                stack.push((successor, path));
+            if !visited.insert(successor) {
+                continue;
             }
-        }
 
-        valid_paths
+            // Check that `successor` is a predecessor of `destination_block`.
+            //
+            // Given two `PoloniusBlock`s a and b, then a is a predecessor of b iff
+            // `a.basic_block()` is a predecessor of `b.basic_block()`, or a is the "before
+            // introduction block" and b is the "introduction block".
+            if !bcx.pcx.transitive_predecessors[destination.block].contains(successor_bb)
+                || destination_block.is_introduction_block(bcx)
+                    && successor.is_before_introduction_block(bcx)
+            {
+                // `successor` is not a predecessor of `destination_block`.
+                continue;
+            }
+
+            // Push `successor` to `path`.
+            let mut path = path.clone();
+            path.insert(successor);
+            stack.push((successor, path));
+        }
     }
+
+    valid_paths
 }
 
 /// Create an empty bit set with capacity for all regions.
