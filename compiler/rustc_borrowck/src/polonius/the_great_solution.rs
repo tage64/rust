@@ -47,6 +47,7 @@ macro_rules! my_print {
 }
 pub(crate) use my_print;
 
+/// A cache remembering whether a loan is killed at a block.
 type KillsCache = IndexVec<PoloniusBlock, Option<KillAtBlock>>;
 
 pub(crate) struct PoloniusOutOfScopePrecomputer<'a, 'tcx> {
@@ -275,7 +276,8 @@ struct LoanRegionNode {
 
 struct ScopeComputation {
     nodes: FxHashMap<Location, LoanRegionNode>,
-    stack: Vec<Location>,
+    primary_stack: Vec<Location>,
+    secondary_stack: Vec<Location>,
     is_finished: bool,
 }
 
@@ -470,11 +472,11 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
         }
 
         // Check if the loan is killed anywhere between its reserve location and `location`.
-        let Some(_live_paths) = live_paths(bcx, kills_cache, location) else {
+        let Some(live_paths) = live_paths(bcx, kills_cache, location) else {
             return false;
         };
 
-        scope_computation.compute(bcx, kills_cache, location)
+        scope_computation.compute(bcx, kills_cache, location, live_paths)
     }
 }
 
@@ -617,7 +619,12 @@ impl ScopeComputation {
                 added_to_stack: true,
             },
         );
-        Self { stack: vec![bcx.borrow.reserve_location], nodes, is_finished: false }
+        Self {
+            primary_stack: vec![bcx.borrow.reserve_location],
+            secondary_stack: vec![],
+            nodes,
+            is_finished: false,
+        }
     }
 
     fn compute(
@@ -625,10 +632,11 @@ impl ScopeComputation {
         bcx: BorrowContext<'_, '_>,
         kills_cache: &mut KillsCache,
         target_location: Location,
+        live_paths: ThinBitSet<PoloniusBlock>,
     ) -> bool {
         debug_assert!(!self.is_finished);
 
-        while let Some(location) = self.stack.pop() {
+        while let Some(location) = self.primary_stack.pop().or_else(|| self.secondary_stack.pop()) {
             let point = bcx.pcx.location_map.point_from_location(location);
             let block_data = &bcx.pcx.body[location.block];
 
@@ -770,7 +778,13 @@ impl ScopeComputation {
                     }
 
                     if new_node_changed && !new_node.added_to_stack {
-                        self.stack.push(new_location);
+                        if !is_forward
+                            || live_paths.contains(PoloniusBlock::from_location(bcx, new_location))
+                        {
+                            self.primary_stack.push(new_location);
+                        } else {
+                            self.secondary_stack.push(new_location);
+                        }
                         new_node.added_to_stack = true;
                     }
                 },
