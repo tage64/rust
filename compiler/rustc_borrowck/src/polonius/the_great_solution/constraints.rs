@@ -1,7 +1,6 @@
 use std::assert_matches::assert_matches;
 use std::mem;
 
-use rustc_data_structures::fx::FxHashSet;
 use rustc_index::IndexVec;
 use rustc_index::bit_set::thin_bit_set::{SparseBitMatrix, ThinBitSet};
 use rustc_middle::mir::{
@@ -238,45 +237,7 @@ impl<'a, 'tcx> Constraints<'a, 'tcx> {
         statement: &Statement<'tcx>,
     ) -> Option<TimeTravelDirection> {
         match &statement.kind {
-            StatementKind::Assign(box (lhs, rhs)) => {
-                // TODO: Check this comment:
-                // To create localized outlives constraints without midpoints, we rely on the property
-                // that no input regions from the RHS of the assignment will flow into themselves: they
-                // should not appear in the output regions in the LHS. We believe this to be true by
-                // construction of the MIR, via temporaries, and assert it here.
-                //
-                // We think we don't need midpoints because:
-                // - every LHS Place has a unique set of regions that don't appear elsewhere
-                // - this implies that for them to be part of the RHS, the same Place must be read and
-                //   written
-                // - and that should be impossible in MIR
-                //
-                // When we have a more complete implementation in the future, tested with crater, etc,
-                // we can maybe remove this assertion.
-                debug_assert!(
-                    {
-                        let mut lhs_regions = FxHashSet::default();
-                        self.tcx.for_each_free_region(lhs, |region| {
-                            let region = self.regioncx.universal_regions().to_region_vid(region);
-                            lhs_regions.insert(region);
-                        });
-
-                        let mut rhs_regions = FxHashSet::default();
-                        self.tcx.for_each_free_region(rhs, |region| {
-                            let region = self.regioncx.universal_regions().to_region_vid(region);
-                            rhs_regions.insert(region);
-                        });
-
-                        // The intersection between LHS and RHS regions should be empty.
-                        lhs_regions.is_disjoint(&rhs_regions)
-                    },
-                    "there should be no common regions between the LHS and RHS of an assignment"
-                );
-
-                // As mentioned earlier, we should be tracking these better upstream but: we want to
-                // relate the types on entry to the type of the place on exit. That is, outlives
-                // constraints on the RHS are on entry, and outlives constraints to/from the LHS are on
-                // exit (i.e. on entry to the successor location).
+            StatementKind::Assign(box (lhs, _)) => {
                 let lhs_ty = self.body.local_decls[lhs.local].ty;
                 self.compute_constraint_direction(constraint, &lhs_ty)
             }
