@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::VecDeque;
 use std::rc::Rc;
 
 use rustc_data_structures::binary_search_util;
@@ -31,8 +31,8 @@ use crate::constraints::{ConstraintSccIndex, OutlivesConstraint, OutlivesConstra
 use crate::dataflow::BorrowIndex;
 use crate::diagnostics::{RegionErrorKind, RegionErrors, UniverseInfo};
 use crate::member_constraints::{MemberConstraintSet, NllMemberConstraintIndex};
+use crate::polonius::LiveLoans;
 use crate::polonius::legacy::PoloniusOutput;
-use crate::polonius::{ConstraintDirection, LiveLoans};
 use crate::region_infer::reverse_sccs::ReverseSccGraph;
 use crate::region_infer::values::{LivenessValues, RegionElement, RegionValues, ToElementIndex};
 use crate::type_check::free_region_relations::UniversalRegionRelations;
@@ -197,8 +197,7 @@ pub struct RegionInferenceContext<'tcx> {
     universal_region_relations: Frozen<UniversalRegionRelations<'tcx>>,
 
     /// FIXME: Should these really go here?
-    pub(crate) location_map: Option<Rc<DenseLocationMap>>,
-    pub(crate) live_region_variances: Option<BTreeMap<RegionVid, ConstraintDirection>>,
+    pub(crate) location_map: Rc<DenseLocationMap>,
 }
 
 /// Each time that `apply_member_constraint` is successful, it appends
@@ -443,7 +442,7 @@ impl<'tcx> RegionInferenceContext<'tcx> {
         }
 
         let mut scc_values =
-            RegionValues::new(location_map, universal_regions.len(), placeholder_indices);
+            RegionValues::new(location_map.clone(), universal_regions.len(), placeholder_indices);
 
         for region in liveness_constraints.regions() {
             let scc = constraint_sccs.scc(region);
@@ -467,8 +466,7 @@ impl<'tcx> RegionInferenceContext<'tcx> {
             scc_values,
             type_tests,
             universal_region_relations,
-            location_map: None,
-            live_region_variances: None,
+            location_map,
         };
 
         result.init_free_and_bound_regions();
@@ -2235,6 +2233,7 @@ impl<'tcx> RegionInferenceContext<'tcx> {
 
     /// When using `-Zpolonius=next`, records the given live loans for the loan scopes and active
     /// loans dataflow computations.
+    #[expect(dead_code)] // FIXME: Maybe remove this function?
     pub(crate) fn record_live_loans(&mut self, live_loans: LiveLoans) {
         self.liveness_constraints.record_live_loans(live_loans);
     }

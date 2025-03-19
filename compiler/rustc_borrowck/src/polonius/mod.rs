@@ -43,26 +43,26 @@
 //! 4) transfer this back to the main borrowck procedure: it handles computing errors and
 //!    diagnostics, debugging and MIR dumping concerns.
 
+#![expect(dead_code, unused_imports)] // FIXME: Most things here are currently not used.
+
 mod constraints;
-mod dump;
 pub(crate) mod legacy;
 mod liveness_constraints;
 mod loan_liveness;
+#[deny(dead_code, unused_imports)]
 pub(crate) mod the_great_solution;
 mod typeck_constraints;
 
 use std::collections::BTreeMap;
-use std::rc::Rc;
 
 use rustc_data_structures::fx::FxHashSet;
 use rustc_index::bit_set::SparseBitMatrix;
 use rustc_index::interval::SparseIntervalMatrix;
 use rustc_middle::mir::{Body, Local};
 use rustc_middle::ty::{RegionVid, TyCtxt};
-use rustc_mir_dataflow::points::{DenseLocationMap, PointIndex};
+use rustc_mir_dataflow::points::PointIndex;
 
 pub(crate) use self::constraints::*;
-pub(crate) use self::dump::dump_polonius_mir;
 use self::liveness_constraints::create_liveness_constraints;
 use self::loan_liveness::compute_loan_liveness;
 use self::typeck_constraints::convert_typeck_constraints;
@@ -77,7 +77,7 @@ pub(crate) type LiveLoans = SparseBitMatrix<PointIndex, BorrowIndex>;
 pub(crate) struct PoloniusLivenessContext {
     /// The expected edge direction per live region: the kind of directed edge we'll create as
     /// liveness constraints depends on the variance of types with respect to each contained region.
-    live_region_variances: BTreeMap<RegionVid, ConstraintDirection>,
+    pub(crate) live_region_variances: BTreeMap<RegionVid, ConstraintDirection>,
 
     /// The regions that outlive free regions are used to distinguish relevant live locals from
     /// boring locals. A boring local is one whose type contains only such regions. Polonius
@@ -100,11 +100,10 @@ pub(crate) struct PoloniusContext {
 /// This struct holds the data needed by the borrowck error computation and diagnostics. Its data is
 /// computed from the [PoloniusContext] when computing NLL regions.
 pub(crate) struct PoloniusDiagnosticsContext {
-    /// The localized outlives constraints that were computed in the main analysis.
-    localized_outlives_constraints: LocalizedOutlivesConstraintSet,
-
     /// The liveness data computed during MIR typeck: [PoloniusLivenessContext::boring_nll_locals].
     pub(crate) boring_nll_locals: FxHashSet<Local>,
+
+    pub(crate) live_region_variances: BTreeMap<RegionVid, ConstraintDirection>,
 }
 
 /// The direction a constraint can flow into. Used to create liveness constraints according to
@@ -152,17 +151,18 @@ impl PoloniusContext {
     /// liveness, to be used by the loan scope and active loans computations.
     ///
     /// The constraint data will be used to compute errors and diagnostics.
+    #[expect(unused_variables)]
     pub(crate) fn compute_loan_liveness<'tcx>(
         self,
         tcx: TyCtxt<'tcx>,
         regioncx: &mut RegionInferenceContext<'tcx>,
         body: &Body<'tcx>,
         borrow_set: &BorrowSet<'tcx>,
-        location_map: Rc<DenseLocationMap>,
     ) -> PoloniusDiagnosticsContext {
         let PoloniusLivenessContext { live_region_variances, boring_nll_locals } =
             self.liveness_context;
 
+        /*  Deactivates old Polonius
         let mut localized_outlives_constraints = LocalizedOutlivesConstraintSet::default();
         convert_typeck_constraints(
             tcx,
@@ -193,10 +193,8 @@ impl PoloniusContext {
             &localized_outlives_constraints,
         );
         regioncx.record_live_loans(live_loans);
+        */
 
-        regioncx.location_map = Some(location_map);
-        regioncx.live_region_variances = Some(live_region_variances);
-
-        PoloniusDiagnosticsContext { localized_outlives_constraints, boring_nll_locals }
+        PoloniusDiagnosticsContext { live_region_variances, boring_nll_locals }
     }
 }

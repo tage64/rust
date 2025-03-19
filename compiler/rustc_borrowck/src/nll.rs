@@ -151,7 +151,6 @@ pub(crate) fn compute_regions<'a, 'tcx>(
             &mut regioncx,
             body,
             borrow_set,
-            location_map,
         )
     });
 

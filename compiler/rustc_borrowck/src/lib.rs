@@ -316,9 +316,9 @@ fn do_mir_borrowck<'tcx>(
                 tcx,
                 &regioncx,
                 body,
-                regioncx.location_map.as_ref().unwrap(),
+                &regioncx.location_map,
                 &borrow_set,
-                regioncx.live_region_variances.as_ref().unwrap(),
+                &polonius_diagnostics.as_ref().unwrap().live_region_variances,
             ))
         } else {
             None
@@ -337,16 +337,6 @@ fn do_mir_borrowck<'tcx>(
     );
 
     mbcx.report_move_errors();
-
-    // If requested, dump polonius MIR.
-    polonius::dump_polonius_mir(
-        &infcx,
-        body,
-        &regioncx,
-        &borrow_set,
-        polonius_diagnostics.as_ref(),
-        &opt_closure_req,
-    );
 
     // For each non-user used mutable variable, check if it's been assigned from
     // a user-declared local. If so, then put that local into the used_mut set.
@@ -406,11 +396,21 @@ fn get_flow_results<'a, 'tcx>(
 ) -> Results<'tcx, Borrowck<'a, 'tcx>> {
     // We compute these three analyses individually, but them combine them into
     // a single results so that `mbcx` can visit them all together.
-    let borrows = Borrows::new(tcx, body, regioncx, borrow_set).iterate_to_fixpoint(
-        tcx,
-        body,
-        Some("borrowck"),
-    );
+    let borrows = if !tcx.sess.opts.unstable_opts.polonius.is_next_enabled() {
+        Borrows::new(tcx, body, regioncx, borrow_set).iterate_to_fixpoint(
+            tcx,
+            body,
+            Some("borrowck"),
+        )
+    } else {
+        // Currently, Polonius computes the scopes of borrows with a lazy top-down strategy, so this
+        // is not needed.
+        Results {
+            analysis: Borrows::dummy(tcx, body, borrow_set),
+            entry_states: IndexVec::from_elem_n(DenseBitSet::new_empty(0), body.basic_blocks.len()),
+        }
+    };
+
     let uninits = MaybeUninitializedPlaces::new(tcx, body, move_data).iterate_to_fixpoint(
         tcx,
         body,
@@ -809,8 +809,20 @@ impl<'a, 'tcx> ResultsVisitor<'a, 'tcx, Borrowck<'a, 'tcx>> for MirBorrowckCtxt<
             TerminatorKind::Yield { value: _, resume: _, resume_arg: _, drop: _ } => {
                 if self.movable_coroutine {
                     // Look for any active borrows to locals
-                    for i in state.borrows.iter() {
-                        let borrow = &self.borrow_set[i];
+                    for (borrow_idx, _) in self.borrow_set.iter_enumerated() {
+                        let borrow_in_scope = if let Some(ref mut scopes_computer) =
+                            self.polonius_out_of_scope_computer
+                        {
+                            scopes_computer.loan_in_scope_at(borrow_idx, loc)
+                        } else {
+                            let borrows_in_scope = self.borrows_in_scope(loc, state);
+                            borrows_in_scope.contains(borrow_idx)
+                        };
+                        if !borrow_in_scope {
+                            continue;
+                        }
+
+                        let borrow = &self.borrow_set[borrow_idx];
                         self.check_for_local_borrow(borrow, span);
                     }
                 }
@@ -824,8 +836,20 @@ impl<'a, 'tcx> ResultsVisitor<'a, 'tcx, Borrowck<'a, 'tcx>> for MirBorrowckCtxt<
                 // Often, the storage will already have been killed by an explicit
                 // StorageDead, but we don't always emit those (notably on unwind paths),
                 // so this "extra check" serves as a kind of backup.
-                for i in state.borrows.iter() {
-                    let borrow = &self.borrow_set[i];
+                for (borrow_idx, _) in self.borrow_set.iter_enumerated() {
+                    let borrow_in_scope = if let Some(ref mut scopes_computer) =
+                        self.polonius_out_of_scope_computer
+                    {
+                        scopes_computer.loan_in_scope_at(borrow_idx, loc)
+                    } else {
+                        let borrows_in_scope = self.borrows_in_scope(loc, state);
+                        borrows_in_scope.contains(borrow_idx)
+                    };
+                    if !borrow_in_scope {
+                        continue;
+                    }
+
+                    let borrow = &self.borrow_set[borrow_idx];
                     self.check_for_invalidation_at_exit(loc, borrow, span);
                 }
             }
