@@ -457,6 +457,11 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
             unreachable!()
         };
 
+        // Check if this location can never be reached by the borrow.
+        if !self.pcx.is_predecessor(bcx.borrow.reserve_location(), location) {
+            return false;
+        }
+
         // Check if we have already computed an "in scope-value" for location.
         if let Some(scope_computation) = &scope_computation {
             if scope_computation.is_finished {
@@ -472,11 +477,6 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
         }
 
         if !self.pcx.regioncx.region_contains(bcx.borrow.region, location) {
-            return false;
-        }
-
-        // Check if this location can never be reached by the borrow.
-        if !self.pcx.is_predecessor(bcx.borrow.reserve_location(), location) {
             return false;
         }
 
