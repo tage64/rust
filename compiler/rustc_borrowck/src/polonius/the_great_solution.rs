@@ -479,11 +479,6 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
             }
         }
 
-        // Check if the loan is killed anywhere between its reserve location and `location`.
-        let Some(live_paths) = live_paths(bcx, kills_cache, location) else {
-            return false;
-        };
-
         // Check if any possibly dependent regions are live at `location`.
         let mut possibly_dependent_regions = possibly_dependent_regions
             .get_or_insert_with(|| {
@@ -497,6 +492,11 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
         if possibly_dependent_regions.is_empty() {
             return false;
         }
+
+        // Check if the loan is killed anywhere between its reserve location and `location`.
+        let Some(live_paths) = live_paths(bcx, kills_cache, location) else {
+            return false;
+        };
 
         scope_computation.get_or_insert_with(|| ScopeComputation::new(bcx)).compute(
             bcx,
