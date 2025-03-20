@@ -122,7 +122,8 @@ enum PoloniusBorrowData {
 
     Data {
         kills_cache: KillsCache,
-        scope_computation: ScopeComputation,
+        possibly_dependent_regions: Option<ThinBitSet<RegionVid>>,
+        scope_computation: Option<ScopeComputation>,
     },
 }
 
@@ -444,12 +445,17 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
 
                 *maybe_borrow_data = Some(PoloniusBorrowData::Data {
                     kills_cache: IndexVec::new(),
-                    scope_computation: ScopeComputation::new(bcx),
+                    scope_computation: None,
+                    possibly_dependent_regions: None,
                 });
             }
         };
 
-        let Some(PoloniusBorrowData::Data { kills_cache, scope_computation }) = maybe_borrow_data
+        let Some(PoloniusBorrowData::Data {
+            kills_cache,
+            possibly_dependent_regions,
+            scope_computation,
+        }) = maybe_borrow_data
         else {
             unreachable!()
         };
@@ -460,15 +466,17 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
         }
 
         // Check if we have already computed an "in scope-value" for location.
-        if scope_computation.is_finished {
-            // If the scope computation is finished, it's appropriate to return `false` if no
-            // node for the location exists.
-            return scope_computation.nodes.get(&location).is_some_and(|x| x.in_scope);
+        if let Some(scope_computation) = &scope_computation {
+            if scope_computation.is_finished {
+                // If the scope computation is finished, it's appropriate to return `false` if no
+                // node for the location exists.
+                return scope_computation.nodes.get(&location).is_some_and(|x| x.in_scope);
 
-            // If the computation is not finished, we can only be sure if the `in_scope`-field
-            // has been set to `true` for the relevant node.
-        } else if scope_computation.nodes.get(&location).is_some_and(|x| x.in_scope) {
-            return true;
+                // If the computation is not finished, we can only be sure if the `in_scope`-field
+                // has been set to `true` for the relevant node.
+            } else if scope_computation.nodes.get(&location).is_some_and(|x| x.in_scope) {
+                return true;
+            }
         }
 
         // Check if the loan is killed anywhere between its reserve location and `location`.
@@ -476,7 +484,26 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
             return false;
         };
 
-        scope_computation.compute(bcx, kills_cache, location, live_paths)
+        // Check if any possibly dependent regions are live at `location`.
+        let mut possibly_dependent_regions = possibly_dependent_regions
+            .get_or_insert_with(|| {
+                let mut initial_regions = new_empty_region_set(self.pcx.regioncx);
+                initial_regions.insert(bcx.borrow.region);
+                self.pcx.constraints.add_dependent_regions(&mut initial_regions);
+                initial_regions
+            })
+            .clone();
+        remove_dead_regions(&self.pcx, location, &mut possibly_dependent_regions);
+        if possibly_dependent_regions.is_empty() {
+            return false;
+        }
+
+        scope_computation.get_or_insert_with(|| ScopeComputation::new(bcx)).compute(
+            bcx,
+            kills_cache,
+            location,
+            live_paths,
+        )
     }
 }
 
@@ -627,6 +654,7 @@ impl ScopeComputation {
         }
     }
 
+    #[inline(never)] // FIXME: Remove this.
     fn compute(
         &mut self,
         bcx: BorrowContext<'_, '_>,
@@ -842,6 +870,7 @@ fn visit_adjacent_locations(
     }
 }
 
+#[inline(never)] // FIXME: Remove this.
 fn live_paths(
     bcx: BorrowContext<'_, '_>,
     kills_cache: &mut KillsCache,

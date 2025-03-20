@@ -396,6 +396,7 @@ impl<'a, 'tcx> Constraints<'a, 'tcx> {
     /// - `'b: 'd`
     /// - `'d: 'e`
     /// Then `'c`, `'d` and `'e` will be added to the set.
+    #[inline(never)] // FIXME: Remove this.
     pub(crate) fn add_dependent_regions(&self, regions: &mut ThinBitSet<RegionVid>) {
         // This function will loop until there are no more regions to add. It will keep a set of
         // regions that has not been considered yet (the `to_check` variable). At each iteration of
