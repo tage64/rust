@@ -451,11 +451,8 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
             }
         };
 
-        let Some(PoloniusBorrowData::Data {
-            kills_cache,
-            possibly_dependent_regions,
-            scope_computation,
-        }) = maybe_borrow_data
+        let Some(PoloniusBorrowData::Data { kills_cache, scope_computation, .. }) =
+            maybe_borrow_data
         else {
             unreachable!()
         };
@@ -478,18 +475,7 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                 return true;
             }
         }
-
-        // Check if any possibly dependent regions are live at `location`.
-        let mut possibly_dependent_regions = possibly_dependent_regions
-            .get_or_insert_with(|| {
-                let mut initial_regions = new_empty_region_set(self.pcx.regioncx);
-                initial_regions.insert(bcx.borrow.region);
-                self.pcx.constraints.add_dependent_regions(&mut initial_regions);
-                initial_regions
-            })
-            .clone();
-        remove_dead_regions(&self.pcx, location, &mut possibly_dependent_regions);
-        if possibly_dependent_regions.is_empty() {
+        if !self.pcx.regioncx.region_contains(bcx.borrow.region, location) {
             return false;
         }
 
