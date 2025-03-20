@@ -1059,72 +1059,93 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, '_, 'tcx> {
         rw: ReadOrWrite,
         state: &BorrowckDomain,
     ) -> bool {
-        let mut error_reported = false;
+        let (place, _) = place_span;
 
-        self.each_borrow_involving_path(
-            state,
-            location,
-            (sd, place_span.0),
-            |self_, borrow_index, borrow| match (rw, borrow.kind) {
+        // The number of candidates can be large, but borrows for different locals cannot conflict with
+        // each other, so we restrict the working set a priori.
+        let Some(borrows_for_place_base) = self.borrow_set.local_map.get(&place.local) else {
+            return false;
+        };
+
+        for &borrow_idx in borrows_for_place_base {
+            let borrow = &self.borrow_set[borrow_idx];
+
+            if !places_conflict::borrow_conflicts_with_place(
+                self.infcx.infcx.tcx,
+                self.body,
+                borrow.borrowed_place,
+                borrow.kind,
+                place.as_ref(),
+                sd,
+                places_conflict::PlaceConflictBias::Overlap,
+            ) {
+                continue;
+            }
+
+            match (rw, borrow.kind) {
                 // Obviously an activation is compatible with its own
                 // reservation (or even prior activating uses of same
                 // borrow); so don't check if they interfere.
                 //
                 // NOTE: *reservations* do conflict with themselves;
-                // thus aren't injecting unsoundness w/ self_ check.)
-                (Activation(_, activating), _) if activating == borrow_index => {
+                // thus aren't injecting unsoundness w/ self check.)
+                (Activation(_, activating), _) if activating == borrow_idx => {
                     debug!(
                         "check_access_for_conflict place_span: {:?} sd: {:?} rw: {:?} \
-                         skipping {:?} b/c activation of same borrow_index",
+                         skipping {:?} b/c activation of same borrow_idx",
                         place_span,
                         sd,
                         rw,
-                        (borrow_index, borrow),
+                        (borrow_idx, borrow),
                     );
-                    ControlFlow::Continue(())
                 }
 
                 (Read(_), BorrowKind::Shared | BorrowKind::Fake(_))
                 | (
                     Read(ReadKind::Borrow(BorrowKind::Fake(FakeBorrowKind::Shallow))),
                     BorrowKind::Mut { .. },
-                ) => ControlFlow::Continue(()),
+                ) => (),
 
                 (Reservation(_), BorrowKind::Fake(_) | BorrowKind::Shared) => {
                     // This used to be a future compatibility warning (to be
                     // disallowed on NLL). See rust-lang/rust#56254
-                    ControlFlow::Continue(())
                 }
 
                 (Write(WriteKind::Move), BorrowKind::Fake(FakeBorrowKind::Shallow)) => {
                     // Handled by initialization checks.
-                    ControlFlow::Continue(())
                 }
 
                 (Read(kind), BorrowKind::Mut { .. }) => {
                     // Reading from mere reservations of mutable-borrows is OK.
-                    if !is_active(self_.dominators(), borrow, location) {
+                    if !is_active(self.dominators(), borrow, location) {
                         assert!(borrow.kind.allows_two_phase_borrow());
-                        return ControlFlow::Continue(());
+                        continue;
                     }
 
-                    error_reported = true;
+                    if !self.borrow_in_scope_at(state, borrow_idx, location) {
+                        continue;
+                    }
+
                     match kind {
                         ReadKind::Copy => {
-                            let err = self_
+                            let err = self
                                 .report_use_while_mutably_borrowed(location, place_span, borrow);
-                            self_.buffer_error(err);
+                            self.buffer_error(err);
                         }
                         ReadKind::Borrow(bk) => {
                             let err =
-                                self_.report_conflicting_borrow(location, place_span, bk, borrow);
-                            self_.buffer_error(err);
+                                self.report_conflicting_borrow(location, place_span, bk, borrow);
+                            self.buffer_error(err);
                         }
                     }
-                    ControlFlow::Break(())
+                    return true;
                 }
 
                 (Reservation(kind) | Activation(kind, _) | Write(kind), _) => {
+                    if !self.borrow_in_scope_at(state, borrow_idx, location) {
+                        continue;
+                    }
+
                     match rw {
                         Reservation(..) => {
                             debug!(
@@ -1132,26 +1153,25 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, '_, 'tcx> {
                                  place: {:?}",
                                 place_span.0
                             );
-                            self_.reservation_error_reported.insert(place_span.0);
+                            self.reservation_error_reported.insert(place_span.0);
                         }
                         Activation(_, activating) => {
                             debug!(
                                 "observing check_place for activation of \
-                                 borrow_index: {:?}",
+                                 borrow_idx: {:?}",
                                 activating
                             );
                         }
                         Read(..) | Write(..) => {}
                     }
 
-                    error_reported = true;
                     match kind {
                         WriteKind::MutableBorrow(bk) => {
                             let err =
-                                self_.report_conflicting_borrow(location, place_span, bk, borrow);
-                            self_.buffer_error(err);
+                                self.report_conflicting_borrow(location, place_span, bk, borrow);
+                            self.buffer_error(err);
                         }
-                        WriteKind::StorageDeadOrDrop => self_
+                        WriteKind::StorageDeadOrDrop => self
                             .report_borrowed_value_does_not_live_long_enough(
                                 location,
                                 borrow,
@@ -1159,21 +1179,22 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, '_, 'tcx> {
                                 Some(WriteKind::StorageDeadOrDrop),
                             ),
                         WriteKind::Mutate => {
-                            self_.report_illegal_mutation_of_borrowed(location, place_span, borrow)
+                            self.report_illegal_mutation_of_borrowed(location, place_span, borrow)
                         }
                         WriteKind::Move => {
-                            self_.report_move_out_while_borrowed(location, place_span, borrow)
+                            self.report_move_out_while_borrowed(location, place_span, borrow)
                         }
                         WriteKind::Replace => {
-                            self_.report_illegal_mutation_of_borrowed(location, place_span, borrow)
+                            self.report_illegal_mutation_of_borrowed(location, place_span, borrow)
                         }
                     }
-                    ControlFlow::Break(())
-                }
-            },
-        );
 
-        error_reported
+                    return true;
+                }
+            }
+        }
+
+        false
     }
 
     /// Checks whether a borrow is in scope.
@@ -1196,6 +1217,7 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, '_, 'tcx> {
     }
 
     /// Encapsulates the idea of iterating over every borrow that involves a particular path
+    #[expect(dead_code)] // FIXME: Remove this method.
     fn each_borrow_involving_path(
         &mut self,
         state: &BorrowckDomain,
@@ -1265,23 +1287,50 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, '_, 'tcx> {
 
         // This is a very simplified version of `Self::check_access_for_conflict`.
         // We are here checking on BIDs and specifically still-live borrows of data involving the BIDs.
-        self.each_borrow_involving_path(state, location, (sd, place), |self_, _, borrow| {
-            if matches!(borrow.kind, BorrowKind::Fake(_)) {
-                return ControlFlow::Continue(());
+
+        // The number of candidates can be large, but borrows for different locals cannot conflict with
+        // each other, so we restrict the working set a priori.
+        let Some(borrows_for_place_base) = self.borrow_set.local_map.get(&place.local) else {
+            return;
+        };
+
+        for &borrow_idx in borrows_for_place_base {
+            let borrow = &self.borrow_set[borrow_idx];
+
+            if !places_conflict::borrow_conflicts_with_place(
+                self.infcx.infcx.tcx,
+                self.body,
+                borrow.borrowed_place,
+                borrow.kind,
+                place.as_ref(),
+                sd,
+                places_conflict::PlaceConflictBias::Overlap,
+            ) {
+                continue;
             }
-            let borrowed = self_.retrieve_borrow_spans(borrow).var_or_use_path_span();
-            let explain = self_.explain_why_borrow_contains_point(
+
+            if matches!(borrow.kind, BorrowKind::Fake(_)) {
+                continue;
+            }
+
+            // Check if the borrow is in scope.
+            if !self.borrow_in_scope_at(state, borrow_idx, location) {
+                continue;
+            }
+
+            let borrowed = self.retrieve_borrow_spans(borrow).var_or_use_path_span();
+            let explain = self.explain_why_borrow_contains_point(
                 location,
                 borrow,
                 Some((WriteKind::StorageDeadOrDrop, place)),
             );
-            self_.infcx.tcx.node_span_lint(TAIL_EXPR_DROP_ORDER, CRATE_HIR_ID, borrowed, |diag| {
+            self.infcx.tcx.node_span_lint(TAIL_EXPR_DROP_ORDER, CRATE_HIR_ID, borrowed, |diag| {
                 session_diagnostics::TailExprDropOrder { borrowed }.decorate_lint(diag);
-                explain.add_explanation_to_diagnostic(&self_, diag, "", None, None);
+                explain.add_explanation_to_diagnostic(&self, diag, "", None, None);
             });
             // We may stop at the first case
-            ControlFlow::Break(())
-        });
+            break;
+        }
     }
 
     fn mutate_place(
