@@ -1344,12 +1344,19 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             let mut successors = terminator.successors();
             if let Some(succ) = successors.next()
                 && successors.next().is_none()
-                && let &[succ_pred] = self.mir.basic_blocks.predecessors()[succ].as_slice()
             {
-                // bb has a single successor, and bb is its only predecessor. This
-                // makes it a candidate for merging.
-                assert_eq!(succ_pred, bb);
-                true
+                let mut predecessors =
+                    self.mir.basic_blocks.predecessors().adjacent_predecessors[succ].iter();
+                if let Some(succ_pred) = predecessors.next()
+                    && predecessors.next().is_none()
+                {
+                    // bb has a single successor, and bb is its only predecessor. This
+                    // makes it a candidate for merging.
+                    assert_eq!(succ_pred, bb);
+                    true
+                } else {
+                    false
+                }
             } else {
                 false
             }

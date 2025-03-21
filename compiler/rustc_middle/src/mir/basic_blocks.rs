@@ -4,6 +4,7 @@ use rustc_data_structures::fx::FxHashMap;
 use rustc_data_structures::graph;
 use rustc_data_structures::graph::dominators::{Dominators, dominators};
 use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
+use rustc_index::bit_set::DenseBitSet;
 use rustc_index::{IndexSlice, IndexVec};
 use rustc_macros::{HashStable, TyDecodable, TyEncodable, TypeFoldable, TypeVisitable};
 use rustc_serialize::{Decodable, Decoder, Encodable, Encoder};
@@ -18,8 +19,46 @@ pub struct BasicBlocks<'tcx> {
     cache: Cache,
 }
 
-// Typically 95%+ of basic blocks have 4 or fewer predecessors.
-type Predecessors = IndexVec<BasicBlock, SmallVec<[BasicBlock; 4]>>;
+#[derive(Clone, Default, Debug)]
+pub struct Predecessors {
+    /// For every block, we store a set of all proceeding blocks.
+    ///
+    /// ```
+    ///       a
+    ///      / \
+    ///     b   c
+    ///      \ /
+    ///       d
+    /// ```
+    /// In this case we have:
+    /// ```
+    /// a: {}
+    /// b: {a}
+    /// c: {a}
+    /// d: {a, b, c}
+    /// ```
+    pub transitive_predecessors: IndexVec<BasicBlock, DenseBitSet<BasicBlock>>,
+
+    /// For every block we store the immediate predecessors.
+    ///
+    /// ```text
+    ///       a
+    ///      / \
+    ///     b   c
+    ///      \ /
+    ///       d
+    /// ```
+    /// In this case we have:
+    /// ```
+    /// a: {}
+    /// b: {a}
+    /// c: {a}
+    /// d: {b, c}
+    /// ```
+    // FIXME: This is equivalent to `BasicBlocks.predecessors` but uses bit sets instead of
+    // `SmallVec`. Maybe that should be replaced by this.
+    pub adjacent_predecessors: IndexVec<BasicBlock, DenseBitSet<BasicBlock>>,
+}
 
 /// Each `(target, switch)` entry in the map contains a list of switch values
 /// that lead to a `target` block from a `switch` block.
@@ -60,15 +99,51 @@ impl<'tcx> BasicBlocks<'tcx> {
     #[inline]
     pub fn predecessors(&self) -> &Predecessors {
         self.cache.predecessors.get_or_init(|| {
-            let mut preds = IndexVec::from_elem(SmallVec::new(), &self.basic_blocks);
-            for (bb, data) in self.basic_blocks.iter_enumerated() {
-                if let Some(term) = &data.terminator {
-                    for succ in term.successors() {
-                        preds[succ].push(bb);
+            // Compute `transitive_predecessors` and `adjacent_predecessors`.
+            let mut transitive_predecessors =
+                IndexVec::from_elem_n(DenseBitSet::new_empty(self.len()), self.len());
+            let mut adjacent_predecessors = transitive_predecessors.clone();
+            // The stack is initially a reversed postorder traversal of the CFG. However, we might add
+            // add blocks again to the stack if we have loops.
+            let mut stack = self.reverse_postorder().iter().rev().copied().collect::<Vec<_>>();
+            // We keep track of all blocks that are currently not in the stack.
+            let mut not_in_stack = DenseBitSet::new_empty(self.len());
+            while let Some(block) = stack.pop() {
+                not_in_stack.insert(block);
+
+                // Loop over all successors to the block and add `block` to their predecessors.
+                for succ_block in self[block].terminator().successors() {
+                    // Keep track of whether the transitive predecessors of `succ_block` has changed.
+                    let mut changed = false;
+
+                    // Insert `block` in `succ_block`s predecessors.
+                    if adjacent_predecessors[succ_block].insert(block) {
+                        // Remember that `adjacent_predecessors` is a subset of
+                        // `transitive_predecessors`.
+                        changed |= transitive_predecessors[succ_block].insert(block);
+                    }
+
+                    // Add all transitive predecessors of `block` to the transitive predecessors of
+                    // `succ_block`.
+                    if block != succ_block {
+                        let (blocks_predecessors, succ_blocks_predecessors) =
+                            transitive_predecessors.pick2_mut(block, succ_block);
+                        changed |= succ_blocks_predecessors.union(blocks_predecessors);
+
+                        // Check if the `succ_block`s transitive predecessors changed. If so, we may
+                        // need to add it to the stack again.
+                        if changed && not_in_stack.remove(succ_block) {
+                            stack.push(succ_block);
+                        }
                     }
                 }
+
+                debug_assert!(
+                    transitive_predecessors[block].superset(&adjacent_predecessors[block])
+                );
             }
-            preds
+
+            Predecessors { transitive_predecessors, adjacent_predecessors }
         })
     }
 
@@ -181,7 +256,7 @@ impl<'tcx> graph::Successors for BasicBlocks<'tcx> {
 impl<'tcx> graph::Predecessors for BasicBlocks<'tcx> {
     #[inline]
     fn predecessors(&self, node: Self::Node) -> impl Iterator<Item = Self::Node> {
-        self.predecessors()[node].iter().copied()
+        self.predecessors().adjacent_predecessors[node].iter()
     }
 }
 

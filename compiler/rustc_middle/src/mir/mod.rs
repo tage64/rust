@@ -1636,34 +1636,9 @@ impl Location {
 
     /// Returns `true` if `self` is earlier in the control flow graph than `other`.
     pub fn is_predecessor_of<'tcx>(&self, other: Location, body: &Body<'tcx>) -> bool {
-        // If we are in the same block as the other location and are an earlier statement
-        // then we are a predecessor of `other`.
-        if self.block == other.block && self.statement_index < other.statement_index {
-            return true;
-        }
-
-        let predecessors = body.basic_blocks.predecessors();
-
-        // If we're in another block, then we want to check that block is a predecessor of `other`.
-        let mut queue: Vec<BasicBlock> = predecessors[other.block].to_vec();
-        let mut visited = FxHashSet::default();
-
-        while let Some(block) = queue.pop() {
-            // If we haven't visited this block before, then make sure we visit its predecessors.
-            if visited.insert(block) {
-                queue.extend(predecessors[block].iter().cloned());
-            } else {
-                continue;
-            }
-
-            // If we found the block that `self` is in, then we are a predecessor of `other` (since
-            // we found that block by looking at the predecessors of `other`).
-            if self.block == block {
-                return true;
-            }
-        }
-
-        false
+        self.block == other.block && self.statement_index < other.statement_index
+            || body.basic_blocks.predecessors().transitive_predecessors[other.block]
+                .contains(self.block)
     }
 
     #[inline]

@@ -75,7 +75,7 @@ impl Direction for Backward {
         }
 
         let exit_state = state;
-        for pred in body.basic_blocks.predecessors()[block].iter().copied() {
+        for pred in body.basic_blocks.predecessors().adjacent_predecessors[block].iter() {
             match body[pred].terminator().kind {
                 // Apply terminator-specific edge effects.
                 mir::TerminatorKind::Call { destination, target: Some(dest), .. }

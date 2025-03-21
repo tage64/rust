@@ -80,6 +80,7 @@ impl_dyn_send!(
     [indexmap::IndexMap<K, V, S> where K: DynSend, V: DynSend, S: DynSend]
     [thin_vec::ThinVec<T> where T: DynSend]
     [smallvec::SmallVec<A> where A: smallvec::Array + DynSend]
+    [rustc_index::bit_set::DenseBitSet<T> where T]
 );
 
 macro_rules! impls_dyn_sync_neg {
@@ -157,6 +158,7 @@ impl_dyn_sync!(
     [indexmap::IndexMap<K, V, S> where K: DynSync, V: DynSync, S: DynSync]
     [smallvec::SmallVec<A> where A: smallvec::Array + DynSync]
     [thin_vec::ThinVec<T> where T: DynSync]
+    [rustc_index::bit_set::DenseBitSet<T> where T]
 );
 
 pub fn assert_dyn_sync<T: ?Sized + DynSync>() {}
