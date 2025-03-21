@@ -432,6 +432,11 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
     ) -> bool {
         let bcx = BorrowContext { pcx: &self.pcx, borrow_idx, borrow };
 
+        // Check if this location can never be reached by the borrow.
+        if !self.pcx.is_predecessor(bcx.borrow.reserve_location(), location) {
+            return false;
+        }
+
         let maybe_borrow_data = self.borrows.ensure_contains_elem(borrow_idx, || None);
         match maybe_borrow_data {
             Some(PoloniusBorrowData::Ignored) => return false,
@@ -460,11 +465,6 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
         else {
             unreachable!()
         };
-
-        // Check if this location can never be reached by the borrow.
-        if !self.pcx.is_predecessor(bcx.borrow.reserve_location(), location) {
-            return false;
-        }
 
         // Check if we have already computed an "in scope-value" for location.
         if let Some(scope_computation) = &scope_computation {
