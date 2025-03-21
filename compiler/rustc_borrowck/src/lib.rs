@@ -1070,6 +1070,10 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, '_, 'tcx> {
         for &borrow_idx in borrows_for_place_base {
             let borrow = &self.borrow_set[borrow_idx];
 
+            if !self.borrow_maybe_in_scope_at(borrow_idx, borrow, location) {
+                continue;
+            }
+
             if !places_conflict::borrow_conflicts_with_place(
                 self.infcx.infcx.tcx,
                 self.body,
@@ -1197,6 +1201,19 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, '_, 'tcx> {
         false
     }
 
+    fn borrow_maybe_in_scope_at(
+        &mut self,
+        borrow_idx: BorrowIndex,
+        borrow: &BorrowData<'tcx>,
+        location: Location,
+    ) -> bool {
+        if let Some(ref mut scopes_computer) = self.polonius_out_of_scope_computer {
+            scopes_computer.loan_maybe_in_scope_at(borrow_idx, borrow, location)
+        } else {
+            true
+        }
+    }
+
     /// Checks whether a borrow is in scope.
     ///
     /// If NLL is used, it will just check in `state.borrows`, but if Polonius is used it will ask
@@ -1238,6 +1255,10 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, '_, 'tcx> {
         // borrows of P, P.a.b, etc.
         for &borrow_idx in borrows_for_place_base {
             let borrow = &self.borrow_set[borrow_idx];
+
+            if !self.borrow_maybe_in_scope_at(borrow_idx, borrow, location) {
+                continue;
+            }
 
             if !places_conflict::borrow_conflicts_with_place(
                 self.infcx.infcx.tcx,
@@ -1298,6 +1319,9 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, '_, 'tcx> {
         for &borrow_idx in borrows_for_place_base {
             let borrow = &self.borrow_set[borrow_idx];
 
+            if !self.borrow_maybe_in_scope_at(borrow_idx, borrow, location) {
+                continue;
+            }
             if !places_conflict::borrow_conflicts_with_place(
                 self.infcx.infcx.tcx,
                 self.body,
@@ -1713,15 +1737,17 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, '_, 'tcx> {
 
         let sd = if might_be_alive { Deep } else { Shallow(None) };
 
-        if places_conflict::borrow_conflicts_with_place(
-            self.infcx.tcx,
-            self.body,
-            place,
-            borrow.kind,
-            root_place,
-            sd,
-            places_conflict::PlaceConflictBias::Overlap,
-        ) && self.borrow_in_scope_at(state, borrow_idx, borrow, location)
+        if self.borrow_maybe_in_scope_at(borrow_idx, borrow, location)
+            && places_conflict::borrow_conflicts_with_place(
+                self.infcx.tcx,
+                self.body,
+                place,
+                borrow.kind,
+                root_place,
+                sd,
+                places_conflict::PlaceConflictBias::Overlap,
+            )
+            && self.borrow_in_scope_at(state, borrow_idx, borrow, location)
         {
             debug!("check_for_invalidation_at_exit({:?}): INVALID", place);
             // FIXME: should be talking about the region lifetime instead
@@ -1749,6 +1775,7 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, '_, 'tcx> {
         debug!("check_for_local_borrow({:?})", borrow);
 
         if borrow_of_local_data(borrow.borrowed_place)
+            && self.borrow_maybe_in_scope_at(borrow_idx, borrow, location)
             && self.borrow_in_scope_at(state, borrow_idx, borrow, location)
         {
             let err = self.cannot_borrow_across_coroutine_yield(

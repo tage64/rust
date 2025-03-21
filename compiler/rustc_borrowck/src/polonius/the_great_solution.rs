@@ -435,8 +435,8 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
         }
     }
 
-    /// Check if a loan is in scope at a location.
-    pub(crate) fn loan_in_scope_at(
+    /// Quick check to check if the loan is in scope.
+    pub(crate) fn loan_maybe_in_scope_at(
         &mut self,
         borrow_idx: BorrowIndex,
         borrow: &BorrowData<'tcx>,
@@ -450,7 +450,21 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
         let maybe_borrow_data = self.borrows.ensure_contains_elem(borrow_idx, || None);
         match maybe_borrow_data {
             Some(PoloniusBorrowData::Ignored) => return false,
-            Some(PoloniusBorrowData::Data { .. }) => (),
+            Some(PoloniusBorrowData::Data {
+                scope_computation: Some(scope_computation), ..
+            }) => {
+                // Check if we have already computed an "in scope-value" for location.
+                if scope_computation.is_finished {
+                    // If the scope computation is finished, it's appropriate to return `false` if no
+                    // node for the location exists.
+                    return scope_computation.nodes.get(&location).is_some_and(|x| x.in_scope);
+
+                    // If the computation is not finished, we can only be sure if the `in_scope`-field
+                    // has been set to `true` for the relevant node.
+                } else if scope_computation.nodes.get(&location).is_some_and(|x| x.in_scope) {
+                    return true;
+                }
+            }
             None => {
                 // Check if this borrow is ignored.
                 if borrow.borrowed_place().ignore_borrow(
@@ -461,7 +475,44 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
                     *maybe_borrow_data = Some(PoloniusBorrowData::Ignored);
                     return false;
                 }
+            }
+            Some(PoloniusBorrowData::Data { scope_computation: None, .. }) => (),
+        };
 
+        if !self.pcx.regioncx.region_contains(borrow.region, location) {
+            return false;
+        }
+
+        return true;
+    }
+
+    /// Check if a loan is in scope at a location.
+    pub(crate) fn loan_in_scope_at(
+        &mut self,
+        borrow_idx: BorrowIndex,
+        borrow: &BorrowData<'tcx>,
+        location: Location,
+    ) -> bool {
+        let maybe_borrow_data = &mut self.borrows[borrow_idx];
+        match maybe_borrow_data {
+            Some(PoloniusBorrowData::Ignored) => unreachable!(),
+            Some(PoloniusBorrowData::Data {
+                scope_computation: Some(scope_computation), ..
+            }) => {
+                // Check if we have already computed an "in scope-value" for location.
+                if scope_computation.is_finished {
+                    // If the scope computation is finished, it's appropriate to return `false` if no
+                    // node for the location exists.
+                    return scope_computation.nodes.get(&location).is_some_and(|x| x.in_scope);
+
+                    // If the computation is not finished, we can only be sure if the `in_scope`-field
+                    // has been set to `true` for the relevant node.
+                } else if scope_computation.nodes.get(&location).is_some_and(|x| x.in_scope) {
+                    return true;
+                }
+            }
+            Some(PoloniusBorrowData::Data { .. }) => (),
+            None => {
                 *maybe_borrow_data = Some(PoloniusBorrowData::Data {
                     kills_cache: IndexVec::new(),
                     scope_computation: None,
@@ -475,24 +526,6 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
         else {
             unreachable!()
         };
-
-        // Check if we have already computed an "in scope-value" for location.
-        if let Some(scope_computation) = &scope_computation {
-            if scope_computation.is_finished {
-                // If the scope computation is finished, it's appropriate to return `false` if no
-                // node for the location exists.
-                return scope_computation.nodes.get(&location).is_some_and(|x| x.in_scope);
-
-                // If the computation is not finished, we can only be sure if the `in_scope`-field
-                // has been set to `true` for the relevant node.
-            } else if scope_computation.nodes.get(&location).is_some_and(|x| x.in_scope) {
-                return true;
-            }
-        }
-
-        if !self.pcx.regioncx.region_contains(borrow.region, location) {
-            return false;
-        }
 
         let bcx = BorrowContext { pcx: &self.pcx, borrow_idx, borrow };
 
