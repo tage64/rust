@@ -424,9 +424,13 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
     }
 
     /// Check if a loan is in scope at a location.
-    pub(crate) fn loan_in_scope_at(&mut self, borrow_idx: BorrowIndex, location: Location) -> bool {
-        let bcx =
-            BorrowContext { pcx: &self.pcx, borrow_idx, borrow: &self.pcx.borrow_set[borrow_idx] };
+    pub(crate) fn loan_in_scope_at(
+        &mut self,
+        borrow_idx: BorrowIndex,
+        borrow: &BorrowData<'tcx>,
+        location: Location,
+    ) -> bool {
+        let bcx = BorrowContext { pcx: &self.pcx, borrow_idx, borrow };
 
         let maybe_borrow_data = self.borrows.ensure_contains_elem(borrow_idx, || None);
         match maybe_borrow_data {

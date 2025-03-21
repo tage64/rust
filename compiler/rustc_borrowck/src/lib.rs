@@ -1122,7 +1122,7 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, '_, 'tcx> {
                         continue;
                     }
 
-                    if !self.borrow_in_scope_at(state, borrow_idx, location) {
+                    if !self.borrow_in_scope_at(state, borrow_idx, borrow, location) {
                         continue;
                     }
 
@@ -1142,7 +1142,7 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, '_, 'tcx> {
                 }
 
                 (Reservation(kind) | Activation(kind, _) | Write(kind), _) => {
-                    if !self.borrow_in_scope_at(state, borrow_idx, location) {
+                    if !self.borrow_in_scope_at(state, borrow_idx, borrow, location) {
                         continue;
                     }
 
@@ -1206,10 +1206,11 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, '_, 'tcx> {
         &mut self,
         state: &BorrowckDomain,
         borrow_idx: BorrowIndex,
+        borrow: &BorrowData<'tcx>,
         location: Location,
     ) -> bool {
         if let Some(ref mut scopes_computer) = self.polonius_out_of_scope_computer {
-            scopes_computer.loan_in_scope_at(borrow_idx, location)
+            scopes_computer.loan_in_scope_at(borrow_idx, borrow, location)
         } else {
             let borrows_in_scope = self.borrows_in_scope(location, state);
             borrows_in_scope.contains(borrow_idx)
@@ -1236,13 +1237,13 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, '_, 'tcx> {
         // check for loan restricting path P being used. Accounts for
         // borrows of P, P.a.b, etc.
         for &borrow_idx in borrows_for_place_base {
-            let borrowed = &self.borrow_set[borrow_idx];
+            let borrow = &self.borrow_set[borrow_idx];
 
             if !places_conflict::borrow_conflicts_with_place(
                 self.infcx.infcx.tcx,
                 self.body,
-                borrowed.borrowed_place,
-                borrowed.kind,
+                borrow.borrowed_place,
+                borrow.kind,
                 place.as_ref(),
                 access,
                 places_conflict::PlaceConflictBias::Overlap,
@@ -1251,15 +1252,15 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, '_, 'tcx> {
             }
 
             // Check if the loan is in scope.
-            if !self.borrow_in_scope_at(state, borrow_idx, location) {
+            if !self.borrow_in_scope_at(state, borrow_idx, borrow, location) {
                 continue;
             }
 
             debug!(
                 "each_borrow_involving_path: {:?} @ {:?} vs. {:?}/{:?}",
-                borrow_idx, borrowed, place, access
+                borrow_idx, borrow, place, access
             );
-            let ctrl = op(self, borrow_idx, borrowed);
+            let ctrl = op(self, borrow_idx, borrow);
             if matches!(ctrl, ControlFlow::Break(_)) {
                 return;
             }
@@ -1314,7 +1315,7 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, '_, 'tcx> {
             }
 
             // Check if the borrow is in scope.
-            if !self.borrow_in_scope_at(state, borrow_idx, location) {
+            if !self.borrow_in_scope_at(state, borrow_idx, borrow, location) {
                 continue;
             }
 
@@ -1720,7 +1721,7 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, '_, 'tcx> {
             root_place,
             sd,
             places_conflict::PlaceConflictBias::Overlap,
-        ) && self.borrow_in_scope_at(state, borrow_idx, location)
+        ) && self.borrow_in_scope_at(state, borrow_idx, borrow, location)
         {
             debug!("check_for_invalidation_at_exit({:?}): INVALID", place);
             // FIXME: should be talking about the region lifetime instead
@@ -1748,7 +1749,7 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, '_, 'tcx> {
         debug!("check_for_local_borrow({:?})", borrow);
 
         if borrow_of_local_data(borrow.borrowed_place)
-            && self.borrow_in_scope_at(state, borrow_idx, location)
+            && self.borrow_in_scope_at(state, borrow_idx, borrow, location)
         {
             let err = self.cannot_borrow_across_coroutine_yield(
                 self.retrieve_borrow_spans(borrow).var_or_use(),
