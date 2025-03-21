@@ -2,6 +2,7 @@
 #![deny(unused_imports)]
 mod constraints;
 mod loan_invalidations;
+use std::cell::OnceCell;
 use std::collections::BTreeMap;
 use std::sync::LazyLock;
 
@@ -56,13 +57,7 @@ pub(crate) struct PoloniusOutOfScopePrecomputer<'a, 'tcx> {
 }
 
 pub(crate) struct PoloniusContext<'a, 'tcx> {
-    /// All regions that flows forward.
-    forward_regions: ThinBitSet<RegionVid>,
-    /// All regions that flows backward.
-    backward_regions: ThinBitSet<RegionVid>,
-
-    /// All outlives constraints.
-    constraints: Constraints<'a, 'tcx>,
+    cache: OnceCell<Cache<'a, 'tcx>>,
 
     /// For every block, we store a set of all proceeding blocks.
     ///
@@ -106,12 +101,23 @@ pub(crate) struct PoloniusContext<'a, 'tcx> {
     regioncx: &'a RegionInferenceContext<'tcx>,
     body: &'a Body<'tcx>,
     location_map: &'a DenseLocationMap,
+    live_region_variances: &'a BTreeMap<RegionVid, ConstraintDirection>,
     borrow_set: &'a BorrowSet<'tcx>,
 }
 
+struct Cache<'a, 'tcx> {
+    /// All regions that flows forward.
+    forward_regions: ThinBitSet<RegionVid>,
+    /// All regions that flows backward.
+    backward_regions: ThinBitSet<RegionVid>,
+
+    /// All outlives constraints.
+    constraints: Constraints<'a, 'tcx>,
+}
+
 #[derive(Copy, Clone)]
-struct BorrowContext<'a, 'tcx> {
-    pcx: &'a PoloniusContext<'a, 'tcx>,
+struct BorrowContext<'a, 'b, 'tcx> {
+    pcx: &'a PoloniusContext<'b, 'tcx>,
     borrow_idx: BorrowIndex,
     borrow: &'a BorrowData<'tcx>,
 }
@@ -163,20 +169,20 @@ impl PoloniusBlock {
 
     /// Get the "introduction block". I.E the first block where the loan is introduced.
     #[inline]
-    fn introduction_block(bcx: BorrowContext<'_, '_>) -> Self {
+    fn introduction_block(bcx: BorrowContext<'_, '_, '_>) -> Self {
         Self::from_basic_block(bcx.borrow.reserve_location.block)
     }
 
     /// Get the "before introduction block". I.E the block consisting of statements up to and
     /// including the loan's reserve location.
     #[inline]
-    fn before_introduction_block(bcx: BorrowContext<'_, '_>) -> Self {
+    fn before_introduction_block(bcx: BorrowContext<'_, '_, '_>) -> Self {
         Self::from_usize(bcx.pcx.body.basic_blocks.len())
     }
 
     /// Get the correct block from a loan and a location.
     #[inline]
-    fn from_location(bcx: BorrowContext<'_, '_>, location: Location) -> Self {
+    fn from_location(bcx: BorrowContext<'_, '_, '_>, location: Location) -> Self {
         if location.block == bcx.borrow.reserve_location.block
             && location.statement_index <= bcx.borrow.reserve_location.statement_index
         {
@@ -188,13 +194,13 @@ impl PoloniusBlock {
 
     /// Returns the number of polonius blocks. THat is, the number of blocks + 1.
     #[inline]
-    fn num_blocks(bcx: BorrowContext<'_, '_>) -> usize {
+    fn num_blocks(bcx: BorrowContext<'_, '_, '_>) -> usize {
         bcx.pcx.body.basic_blocks.len() + 1
     }
 
     /// Get the [`BasicBlock`] containing this [`PoloniusBlock``].
     #[inline]
-    fn basic_block(self, bcx: BorrowContext<'_, '_>) -> BasicBlock {
+    fn basic_block(self, bcx: BorrowContext<'_, '_, '_>) -> BasicBlock {
         if self.as_usize() == bcx.pcx.body.basic_blocks.len() {
             bcx.borrow.reserve_location.block
         } else {
@@ -205,21 +211,21 @@ impl PoloniusBlock {
     /// Check if this is the "introduction block". I.E the block immediately after the loan has been
     /// introduced.
     #[inline]
-    fn is_introduction_block(self, bcx: BorrowContext<'_, '_>) -> bool {
+    fn is_introduction_block(self, bcx: BorrowContext<'_, '_, '_>) -> bool {
         self.as_u32() == bcx.borrow.reserve_location.block.as_u32()
     }
 
     /// Check if this is the "before introduction block". I.E the block containing statements up to
     /// and including the loan's reserve location.
     #[inline]
-    fn is_before_introduction_block(self, bcx: BorrowContext<'_, '_>) -> bool {
+    fn is_before_introduction_block(self, bcx: BorrowContext<'_, '_, '_>) -> bool {
         self.as_usize() == bcx.pcx.body.basic_blocks.len()
     }
 
     /// Get the index of the first statement in this block. This will be 0 except for the
     /// introduction block.
     #[inline]
-    fn first_index(self, bcx: BorrowContext<'_, '_>) -> usize {
+    fn first_index(self, bcx: BorrowContext<'_, '_, '_>) -> usize {
         if self.is_introduction_block(bcx) {
             bcx.borrow.reserve_location.statement_index + 1
         } else {
@@ -230,7 +236,7 @@ impl PoloniusBlock {
     /// Get the last statement index for this block. For all blocks except the "before introduction
     /// block", this will point to a terminator, not a statement.
     #[inline]
-    fn last_index(self, bcx: BorrowContext<'_, '_>) -> usize {
+    fn last_index(self, bcx: BorrowContext<'_, '_, '_>) -> usize {
         if !self.is_before_introduction_block(bcx) {
             bcx.pcx.body.basic_blocks[self.basic_block(bcx)].statements.len()
         } else {
@@ -245,7 +251,7 @@ impl PoloniusBlock {
     #[inline]
     fn successors(
         self,
-        bcx: BorrowContext<'_, '_>,
+        bcx: BorrowContext<'_, '_, '_>,
     ) -> impl DoubleEndedIterator<Item = PoloniusBlock> {
         if !self.is_before_introduction_block(bcx) {
             Either::Left(bcx.pcx.body[self.basic_block(bcx)].terminator().successors().map(
@@ -302,31 +308,6 @@ impl<'a, 'tcx> PoloniusContext<'a, 'tcx> {
         borrow_set: &'a BorrowSet<'tcx>,
         live_region_variances: &'a BTreeMap<RegionVid, ConstraintDirection>,
     ) -> Self {
-        // Collect forward and backward regions.
-        let mut forward_regions = new_empty_region_set(regioncx);
-        let mut backward_regions = forward_regions.clone();
-        for region in (0..num_regions(regioncx)).map(RegionVid::from_usize) {
-            match live_region_variances.get(&region) {
-                Some(ConstraintDirection::Forward) => {
-                    forward_regions.insert(region);
-                }
-                Some(ConstraintDirection::Backward) => {
-                    backward_regions.insert(region);
-                }
-                Some(ConstraintDirection::Bidirectional) | None => {
-                    forward_regions.insert(region);
-                    if !regioncx.universal_regions().is_universal_region(region) {
-                        backward_regions.insert(region);
-                    }
-                }
-            }
-        }
-
-        let mut constraints = Constraints::new(tcx, regioncx, body, location_map);
-        for constraint in regioncx.outlives_constraints() {
-            constraints.add_constraint(&constraint);
-        }
-
         // Compute `transitive_predecessors` and `adjacent_predecessors`.
         let mut transitive_predecessors = IndexVec::from_elem_n(
             ThinBitSet::new_empty(body.basic_blocks.len()),
@@ -373,17 +354,48 @@ impl<'a, 'tcx> PoloniusContext<'a, 'tcx> {
         }
 
         Self {
-            constraints,
-            forward_regions,
-            backward_regions,
+            cache: OnceCell::new(),
             transitive_predecessors,
             adjacent_predecessors,
             tcx,
             regioncx,
             body,
             location_map,
+            live_region_variances,
             borrow_set,
         }
+    }
+
+    fn cache(&self) -> &Cache<'a, 'tcx> {
+        self.cache.get_or_init(|| {
+            // Collect forward and backward regions.
+            let mut forward_regions = new_empty_region_set(self.regioncx);
+            let mut backward_regions = forward_regions.clone();
+            for region in (0..num_regions(self.regioncx)).map(RegionVid::from_usize) {
+                match self.live_region_variances.get(&region) {
+                    Some(ConstraintDirection::Forward) => {
+                        forward_regions.insert(region);
+                    }
+                    Some(ConstraintDirection::Backward) => {
+                        backward_regions.insert(region);
+                    }
+                    Some(ConstraintDirection::Bidirectional) | None => {
+                        forward_regions.insert(region);
+                        if !self.regioncx.universal_regions().is_universal_region(region) {
+                            backward_regions.insert(region);
+                        }
+                    }
+                }
+            }
+
+            let mut constraints =
+                Constraints::new(self.tcx, self.regioncx, self.body, self.location_map);
+            for constraint in self.regioncx.outlives_constraints() {
+                constraints.add_constraint(&constraint);
+            }
+
+            Cache { forward_regions, backward_regions, constraints }
+        })
     }
 
     /// Returns `true` iff `a` is earlier in the control flow graph than `b`.
@@ -394,7 +406,7 @@ impl<'a, 'tcx> PoloniusContext<'a, 'tcx> {
     }
 }
 
-impl<'a, 'tcx> BorrowContext<'a, 'tcx> {
+impl<'a, 'b, 'tcx> BorrowContext<'a, 'b, 'tcx> {
     /// Construct a new empty set with capacity for [`PoloniusBlock`]s.
     fn new_polonius_block_set(self) -> ThinBitSet<PoloniusBlock> {
         ThinBitSet::new_empty(PoloniusBlock::num_blocks(self))
@@ -430,10 +442,8 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
         borrow: &BorrowData<'tcx>,
         location: Location,
     ) -> bool {
-        let bcx = BorrowContext { pcx: &self.pcx, borrow_idx, borrow };
-
         // Check if this location can never be reached by the borrow.
-        if !self.pcx.is_predecessor(bcx.borrow.reserve_location(), location) {
+        if !self.pcx.is_predecessor(borrow.reserve_location(), location) {
             return false;
         }
 
@@ -443,7 +453,7 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
             Some(PoloniusBorrowData::Data { .. }) => (),
             None => {
                 // Check if this borrow is ignored.
-                if bcx.borrow.borrowed_place().ignore_borrow(
+                if borrow.borrowed_place().ignore_borrow(
                     self.pcx.tcx,
                     self.pcx.body,
                     &self.pcx.borrow_set.locals_state_at_exit,
@@ -480,9 +490,11 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
             }
         }
 
-        if !self.pcx.regioncx.region_contains(bcx.borrow.region, location) {
+        if !self.pcx.regioncx.region_contains(borrow.region, location) {
             return false;
         }
+
+        let bcx = BorrowContext { pcx: &self.pcx, borrow_idx, borrow };
 
         // Check if the loan is killed anywhere between its reserve location and `location`.
         let Some(live_paths) = live_paths(bcx, kills_cache, location) else {
@@ -499,7 +511,11 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
 }
 
 /// Returns `true` if the loan is killed before the successor location(s).
-fn is_killed(bcx: BorrowContext<'_, '_>, kills_cache: &mut KillsCache, location: Location) -> bool {
+fn is_killed(
+    bcx: BorrowContext<'_, '_, '_>,
+    kills_cache: &mut KillsCache,
+    location: Location,
+) -> bool {
     let polonius_block = PoloniusBlock::from_location(bcx, location);
 
     // Check if we already know the answer.
@@ -530,7 +546,7 @@ fn is_killed(bcx: BorrowContext<'_, '_>, kills_cache: &mut KillsCache, location:
 
 /// Calculate when/if a loan goes out of scope for a set of statements in a block.
 fn is_killed_at_block(
-    bcx: BorrowContext<'_, '_>,
+    bcx: BorrowContext<'_, '_, '_>,
     kills_cache: &mut KillsCache,
     block: PoloniusBlock,
 ) -> bool {
@@ -557,7 +573,7 @@ fn is_killed_at_block(
 /// Given that the borrow was in scope on entry to this statement, check if it goes out of scope
 /// till the next location.
 #[inline]
-fn is_killed_at_stmt<'tcx>(bcx: BorrowContext<'_, 'tcx>, stmt: &Statement<'tcx>) -> bool {
+fn is_killed_at_stmt<'tcx>(bcx: BorrowContext<'_, '_, 'tcx>, stmt: &Statement<'tcx>) -> bool {
     match &stmt.kind {
         mir::StatementKind::Assign(box (lhs, _rhs)) => kill_on_place(bcx, *lhs),
         mir::StatementKind::StorageDead(local) => {
@@ -571,7 +587,7 @@ fn is_killed_at_stmt<'tcx>(bcx: BorrowContext<'_, 'tcx>, stmt: &Statement<'tcx>)
 /// till the succeeding blocks.
 #[inline]
 fn is_killed_at_terminator<'tcx>(
-    bcx: BorrowContext<'_, 'tcx>,
+    bcx: BorrowContext<'_, '_, 'tcx>,
     terminator: &Terminator<'tcx>,
 ) -> bool {
     match &terminator.kind {
@@ -592,7 +608,7 @@ fn is_killed_at_terminator<'tcx>(
 }
 
 #[inline]
-fn kill_on_place<'tcx>(bcx: BorrowContext<'_, 'tcx>, place: Place<'tcx>) -> bool {
+fn kill_on_place<'tcx>(bcx: BorrowContext<'_, '_, 'tcx>, place: Place<'tcx>) -> bool {
     bcx.pcx.borrow_set.local_map.get(&place.local).is_some_and(|bs| bs.contains(&bcx.borrow_idx))
         && if place.projection.is_empty() {
             !bcx.pcx.body.local_decls[place.local].is_ref_to_static()
@@ -621,7 +637,7 @@ fn remove_dead_regions(
 }
 
 impl ScopeComputation {
-    fn new(bcx: BorrowContext<'_, '_>) -> Self {
+    fn new(bcx: BorrowContext<'_, '_, '_>) -> Self {
         // Put the loan's initial region in a set.
         let mut initial_region_set = new_empty_region_set(bcx.pcx.regioncx);
         initial_region_set.insert(bcx.borrow.region);
@@ -648,7 +664,7 @@ impl ScopeComputation {
     #[inline(never)] // FIXME: Remove this.
     fn compute(
         &mut self,
-        bcx: BorrowContext<'_, '_>,
+        bcx: BorrowContext<'_, '_, '_>,
         kills_cache: &mut KillsCache,
         target_location: Location,
         live_paths: ThinBitSet<PoloniusBlock>,
@@ -687,8 +703,11 @@ impl ScopeComputation {
                 );
 
                 // Add constraints.
-                let time_travelling_regions =
-                    bcx.pcx.constraints.add_dependent_regions_at_point(point, &mut added_regions);
+                let time_travelling_regions = bcx
+                    .pcx
+                    .cache()
+                    .constraints
+                    .add_dependent_regions_at_point(point, &mut added_regions);
                 if let Some(tf) = &time_travelling_regions.to_next_loc {
                     my_println!("    Forward time travellers: {:?}", tf);
                 }
@@ -774,9 +793,9 @@ impl ScopeComputation {
                     // Check if any regions should be added to `new_node`.
                     let mut added_regions = associated_regions.clone();
                     if is_forward {
-                        added_regions.intersect(&bcx.pcx.forward_regions);
+                        added_regions.intersect(&bcx.pcx.cache().forward_regions);
                     } else {
-                        added_regions.intersect(&bcx.pcx.backward_regions);
+                        added_regions.intersect(&bcx.pcx.cache().backward_regions);
                     }
 
                     remove_dead_regions(bcx.pcx, new_location, &mut added_regions);
@@ -863,7 +882,7 @@ fn visit_adjacent_locations(
 
 #[inline(never)] // FIXME: Remove this.
 fn live_paths(
-    bcx: BorrowContext<'_, '_>,
+    bcx: BorrowContext<'_, '_, '_>,
     kills_cache: &mut KillsCache,
     destination: Location,
 ) -> Option<ThinBitSet<PoloniusBlock>> {
