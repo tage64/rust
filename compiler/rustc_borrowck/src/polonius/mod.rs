@@ -102,8 +102,6 @@ pub(crate) struct PoloniusContext {
 pub(crate) struct PoloniusDiagnosticsContext {
     /// The liveness data computed during MIR typeck: [PoloniusLivenessContext::boring_nll_locals].
     pub(crate) boring_nll_locals: FxHashSet<Local>,
-
-    pub(crate) live_region_variances: BTreeMap<RegionVid, ConstraintDirection>,
 }
 
 /// The direction a constraint can flow into. Used to create liveness constraints according to
@@ -195,6 +193,6 @@ impl PoloniusContext {
         regioncx.record_live_loans(live_loans);
         */
 
-        PoloniusDiagnosticsContext { live_region_variances, boring_nll_locals }
+        PoloniusDiagnosticsContext { boring_nll_locals }
     }
 }

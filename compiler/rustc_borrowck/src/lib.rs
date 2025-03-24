@@ -318,7 +318,6 @@ fn do_mir_borrowck<'tcx>(
                 body,
                 &regioncx.location_map,
                 &borrow_set,
-                &polonius_diagnostics.as_ref().unwrap().live_region_variances,
             ))
         } else {
             None
