@@ -32,7 +32,7 @@ pub(crate) const MY_DEBUG_PRINTS: LazyLock<bool> = LazyLock::new(|| {
 
 macro_rules! my_println {
     ($($x:expr),*) => {
-        if *crate::polonius::the_great_solution::MY_DEBUG_PRINTS {
+        if *crate::polonius::horatio::MY_DEBUG_PRINTS {
             println!($($x,)*);
         }
     };
@@ -41,7 +41,7 @@ pub(crate) use my_println;
 
 macro_rules! my_print {
     ($($x:expr),*) => {
-        if *crate::polonius::the_great_solution::MY_DEBUG_PRINTS {
+        if *crate::polonius::horatio::MY_DEBUG_PRINTS {
             print!($($x,)*);
         }
     };

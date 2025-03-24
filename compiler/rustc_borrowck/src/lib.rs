@@ -20,7 +20,7 @@ use std::cell::RefCell;
 use std::marker::PhantomData;
 use std::ops::{ControlFlow, Deref};
 
-use polonius::the_great_solution::PoloniusOutOfScopePrecomputer;
+use polonius::horatio::PoloniusOutOfScopePrecomputer;
 use rustc_abi::FieldIdx;
 use rustc_data_structures::fx::{FxIndexMap, FxIndexSet};
 use rustc_data_structures::graph::dominators::Dominators;

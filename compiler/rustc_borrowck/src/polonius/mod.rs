@@ -46,11 +46,11 @@
 #![expect(dead_code, unused_imports)] // FIXME: Most things here are currently not used.
 
 mod constraints;
+#[deny(dead_code, unused_imports)]
+pub(crate) mod horatio;
 pub(crate) mod legacy;
 mod liveness_constraints;
 mod loan_liveness;
-#[deny(dead_code, unused_imports)]
-pub(crate) mod the_great_solution;
 mod typeck_constraints;
 
 use std::collections::BTreeMap;

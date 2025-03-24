@@ -8,7 +8,7 @@ use rustc_middle::mir::{
 use rustc_middle::ty::{RegionVid, TyCtxt};
 use rustc_mir_dataflow::points::PointIndex;
 
-use super::the_great_solution::{my_print, my_println};
+use super::horatio::{my_print, my_println};
 use super::{LiveLoans, LocalizedOutlivesConstraintSet};
 use crate::constraints::OutlivesConstraint;
 use crate::dataflow::BorrowIndex;
