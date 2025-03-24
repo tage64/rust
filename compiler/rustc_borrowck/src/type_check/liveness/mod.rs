@@ -14,6 +14,7 @@ use tracing::debug;
 
 use super::TypeChecker;
 use crate::constraints::OutlivesConstraintSet;
+use crate::polonius::PoloniusLivenessContext;
 use crate::region_infer::values::LivenessValues;
 use crate::universal_regions::UniversalRegions;
 
@@ -70,7 +71,13 @@ pub(super) fn generate<'a, 'tcx>(
 
     // Mark regions that should be live where they appear within rvalues or within a call: like
     // args, regions, and types.
-    record_regular_live_regions(typeck.tcx(), &mut typeck.constraints.liveness_constraints, body);
+    record_regular_live_regions(
+        typeck.tcx(),
+        &mut typeck.constraints.liveness_constraints,
+        &typeck.universal_regions,
+        &mut typeck.polonius_liveness,
+        body,
+    );
 }
 
 // The purpose of `compute_relevant_live_locals` is to define the subset of `Local`
@@ -144,9 +151,12 @@ fn regions_that_outlive_free_regions<'tcx>(
 fn record_regular_live_regions<'tcx>(
     tcx: TyCtxt<'tcx>,
     liveness_constraints: &mut LivenessValues,
+    universal_regions: &UniversalRegions<'tcx>,
+    polonius_liveness: &mut Option<PoloniusLivenessContext>,
     body: &Body<'tcx>,
 ) {
-    let mut visitor = LiveVariablesVisitor { tcx, liveness_constraints };
+    let mut visitor =
+        LiveVariablesVisitor { tcx, liveness_constraints, universal_regions, polonius_liveness };
     for (bb, data) in body.basic_blocks.iter_enumerated() {
         visitor.visit_basic_block_data(bb, data);
     }
@@ -156,6 +166,8 @@ fn record_regular_live_regions<'tcx>(
 struct LiveVariablesVisitor<'a, 'tcx> {
     tcx: TyCtxt<'tcx>,
     liveness_constraints: &'a mut LivenessValues,
+    universal_regions: &'a UniversalRegions<'tcx>,
+    polonius_liveness: &'a mut Option<PoloniusLivenessContext>,
 }
 
 impl<'a, 'tcx> Visitor<'tcx> for LiveVariablesVisitor<'a, 'tcx> {
@@ -205,5 +217,10 @@ impl<'a, 'tcx> LiveVariablesVisitor<'a, 'tcx> {
             let live_region_vid = live_region.as_var();
             self.liveness_constraints.add_location(live_region_vid, location);
         });
+
+        // When using `-Zpolonius=next`, we record the variance of each live region.
+        if let Some(polonius_liveness) = self.polonius_liveness {
+            polonius_liveness.record_live_region_variance(self.tcx, self.universal_regions, value);
+        }
     }
 }

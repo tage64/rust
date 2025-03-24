@@ -1,14 +1,13 @@
 #![allow(dead_code)]
 #![deny(unused_imports)]
 mod constraints;
-mod live_region_variance;
 mod loan_invalidations;
 use std::cell::OnceCell;
+use std::collections::BTreeMap;
 use std::sync::LazyLock;
 
 use constraints::{Constraints, TimeTravellingRegions};
 use itertools::Either;
-use live_region_variance::compute_live_region_variances;
 use rustc_data_structures::fx::FxHashMap;
 use rustc_index::bit_set::thin_bit_set::{SparseBitMatrix, ThinBitSet};
 use rustc_index::{Idx, IndexVec};
@@ -102,6 +101,7 @@ pub(crate) struct PoloniusContext<'a, 'tcx> {
     regioncx: &'a RegionInferenceContext<'tcx>,
     body: &'a Body<'tcx>,
     location_map: &'a DenseLocationMap,
+    live_region_variances: &'a BTreeMap<RegionVid, ConstraintDirection>,
     borrow_set: &'a BorrowSet<'tcx>,
 }
 
@@ -306,6 +306,7 @@ impl<'a, 'tcx> PoloniusContext<'a, 'tcx> {
         body: &'a Body<'tcx>,
         location_map: &'a DenseLocationMap,
         borrow_set: &'a BorrowSet<'tcx>,
+        live_region_variances: &'a BTreeMap<RegionVid, ConstraintDirection>,
     ) -> Self {
         // Compute `transitive_predecessors` and `adjacent_predecessors`.
         let mut transitive_predecessors = IndexVec::from_elem_n(
@@ -360,6 +361,7 @@ impl<'a, 'tcx> PoloniusContext<'a, 'tcx> {
             regioncx,
             body,
             location_map,
+            live_region_variances,
             borrow_set,
         }
     }
@@ -367,12 +369,10 @@ impl<'a, 'tcx> PoloniusContext<'a, 'tcx> {
     fn cache(&self) -> &Cache<'a, 'tcx> {
         self.cache.get_or_init(|| {
             // Collect forward and backward regions.
-            let live_region_variances =
-                compute_live_region_variances(self.tcx, self.regioncx, self.body);
             let mut forward_regions = new_empty_region_set(self.regioncx);
             let mut backward_regions = forward_regions.clone();
             for region in (0..num_regions(self.regioncx)).map(RegionVid::from_usize) {
-                match live_region_variances.get(&region) {
+                match self.live_region_variances.get(&region) {
                     Some(ConstraintDirection::Forward) => {
                         forward_regions.insert(region);
                     }
@@ -420,9 +420,17 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
         body: &'a Body<'tcx>,
         location_map: &'a DenseLocationMap,
         borrow_set: &'a BorrowSet<'tcx>,
+        live_region_variances: &'a BTreeMap<RegionVid, ConstraintDirection>,
     ) -> Self {
         Self {
-            pcx: PoloniusContext::new(tcx, regioncx, body, location_map, borrow_set),
+            pcx: PoloniusContext::new(
+                tcx,
+                regioncx,
+                body,
+                location_map,
+                borrow_set,
+                live_region_variances,
+            ),
             borrows: IndexVec::new(),
         }
     }

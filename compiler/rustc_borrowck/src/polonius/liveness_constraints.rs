@@ -201,11 +201,11 @@ fn add_liveness_constraint(
 /// Extracts variances for regions contained within types. Follows the same structure as
 /// `rustc_infer`'s `Generalizer`: we try to relate a type with itself to track and extract the
 /// variances of regions.
-pub(super) struct VarianceExtractor<'a, 'tcx> {
-    pub tcx: TyCtxt<'tcx>,
-    pub ambient_variance: ty::Variance,
-    pub directions: &'a mut BTreeMap<RegionVid, ConstraintDirection>,
-    pub universal_regions: &'a UniversalRegions<'tcx>,
+struct VarianceExtractor<'a, 'tcx> {
+    tcx: TyCtxt<'tcx>,
+    ambient_variance: ty::Variance,
+    directions: &'a mut BTreeMap<RegionVid, ConstraintDirection>,
+    universal_regions: &'a UniversalRegions<'tcx>,
 }
 
 impl<'tcx> VarianceExtractor<'_, 'tcx> {
