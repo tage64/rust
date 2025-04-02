@@ -543,7 +543,8 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
     }
 }
 
-/// Returns `true` if the loan is killed before the successor location(s).
+/// Returns `true` if the loan is killed at `location`. Note that the kill takes effect at the next
+/// statement.
 fn is_killed(
     bcx: BorrowContext<'_, '_, '_>,
     kills_cache: &mut KillsCache,
@@ -702,6 +703,7 @@ impl ScopeComputation {
         target_location: Location,
         live_paths: ThinBitSet<PoloniusBlock>,
     ) -> bool {
+        my_println!("Checking {:?} at {:?}", bcx.borrow_idx, target_location);
         debug_assert!(!self.is_finished);
 
         while let Some(location) = self.primary_stack.pop().or_else(|| self.secondary_stack.pop()) {
@@ -787,7 +789,7 @@ impl ScopeComputation {
             // Check if the loan is killed.
             let is_killed = is_killed(bcx, kills_cache, location);
 
-            if is_killed && reachable_by_loan {
+            if is_killed && bcx.pcx.is_predecessor(bcx.borrow.reserve_location, location) {
                 continue;
             }
 
