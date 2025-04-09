@@ -1,5 +1,5 @@
-use std::assert_matches::assert_matches;
 use std::mem;
+use std::ops::ControlFlow;
 
 use rustc_index::IndexVec;
 use rustc_index::bit_set::thin_bit_set::{SparseBitMatrix, ThinBitSet};
@@ -281,20 +281,20 @@ impl<'a, 'tcx> Constraints<'a, 'tcx> {
         constraint: &OutlivesConstraint<'tcx>,
         value: &impl TypeVisitable<TyCtxt<'tcx>>,
     ) -> Option<TimeTravelDirection> {
-        let mut dir = None;
-        self.tcx.for_each_free_region(value, |region| {
+        // FIXME: There seem to be cases where both sub and sup appear in the free regions.
+
+        self.tcx.for_each_free_region_until(value, |region| {
             let region = self.regioncx.universal_regions().to_region_vid(region);
             if region == constraint.sub {
                 // This constraint flows into the result, its effects start becoming visible on exit.
-                assert_matches!(dir, None | Some(TimeTravelDirection::Forwards));
-                dir = Some(TimeTravelDirection::Forwards);
+                ControlFlow::Break(TimeTravelDirection::Forwards)
             } else if region == constraint.sup {
                 // This constraint flows from the result, its effects start becoming visible on exit.
-                assert_matches!(dir, None | Some(TimeTravelDirection::Backwards));
-                dir = Some(TimeTravelDirection::Backwards);
+                ControlFlow::Break(TimeTravelDirection::Backwards)
+            } else {
+                ControlFlow::Continue(())
             }
-        });
-        dir
+        })
     }
 
     /// Given a set of regions at a certain point in the CFG, add all regions induced by outlives
