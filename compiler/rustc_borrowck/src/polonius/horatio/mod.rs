@@ -8,7 +8,6 @@ use std::sync::LazyLock;
 
 use constraints::{Constraints, TimeTravellingRegions};
 use itertools::Either;
-use live_region_variance::compute_live_region_variances;
 use rustc_data_structures::fx::FxHashMap;
 use rustc_index::bit_set::thin_bit_set::{SparseBitMatrix, ThinBitSet};
 use rustc_index::{Idx, IndexVec};
@@ -106,8 +105,6 @@ pub(crate) struct PoloniusContext<'a, 'tcx> {
 }
 
 struct Cache<'a, 'tcx> {
-    /// All regions that flows forward.
-    forward_regions: ThinBitSet<RegionVid>,
     /// All regions that flows backward.
     backward_regions: ThinBitSet<RegionVid>,
 
@@ -366,25 +363,10 @@ impl<'a, 'tcx> PoloniusContext<'a, 'tcx> {
 
     fn cache(&self) -> &Cache<'a, 'tcx> {
         self.cache.get_or_init(|| {
-            // Collect forward and backward regions.
-            let live_region_variances =
-                compute_live_region_variances(self.tcx, self.regioncx, self.body);
-            let mut forward_regions = new_empty_region_set(self.regioncx);
-            let mut backward_regions = forward_regions.clone();
+            let mut backward_regions = new_empty_region_set(self.regioncx);
             for region in (0..num_regions(self.regioncx)).map(RegionVid::from_usize) {
-                match live_region_variances.get(&region) {
-                    Some(ConstraintDirection::Forward) => {
-                        forward_regions.insert(region);
-                    }
-                    Some(ConstraintDirection::Backward) => {
-                        backward_regions.insert(region);
-                    }
-                    Some(ConstraintDirection::Bidirectional) | None => {
-                        forward_regions.insert(region);
-                        if !self.regioncx.universal_regions().is_universal_region(region) {
-                            backward_regions.insert(region);
-                        }
-                    }
+                if !self.regioncx.universal_regions().is_universal_region(region) {
+                    backward_regions.insert(region);
                 }
             }
 
@@ -394,7 +376,7 @@ impl<'a, 'tcx> PoloniusContext<'a, 'tcx> {
                 constraints.add_constraint(&constraint);
             }
 
-            Cache { forward_regions, backward_regions, constraints }
+            Cache { backward_regions, constraints }
         })
     }
 
@@ -819,9 +801,7 @@ impl ScopeComputation {
 
                     // Check if any regions should be added to `new_node`.
                     let mut added_regions = associated_regions.clone();
-                    if is_forward {
-                        added_regions.intersect(&bcx.pcx.cache().forward_regions);
-                    } else {
+                    if !is_forward {
                         added_regions.intersect(&bcx.pcx.cache().backward_regions);
                     }
 
