@@ -37,35 +37,20 @@ pub(super) fn generate<'a, 'tcx>(
 ) {
     debug!("liveness::generate");
 
-    let mut free_regions = regions_that_outlive_free_regions(
-        typeck.infcx.num_region_vars(),
-        &typeck.universal_regions,
-        &typeck.constraints.outlives_constraints,
-    );
+    let relevant_live_locals = if typeck.tcx().sess.opts.unstable_opts.polonius.is_next_enabled() {
+        compute_relevant_live_locals(typeck.tcx(), body, |r| {
+            typeck.universal_regions.is_universal_region(r)
+        })
+    } else {
+        let free_regions = regions_that_outlive_free_regions(
+            typeck.infcx.num_region_vars(),
+            &typeck.universal_regions,
+            &typeck.constraints.outlives_constraints,
+        );
+        compute_relevant_live_locals(typeck.tcx(), body, |r| free_regions.contains(&r))
+    };
 
-    // NLLs can avoid computing some liveness data here because its constraints are
-    // location-insensitive, but that doesn't work in polonius: locals whose type contains a region
-    // that outlives a free region are not necessarily live everywhere in a flow-sensitive setting,
-    // unlike NLLs.
-    // We do record these regions in the polonius context, since they're used to differentiate
-    // relevant and boring locals, which is a key distinction used later in diagnostics.
-    if typeck.tcx().sess.opts.unstable_opts.polonius.is_next_enabled() {
-        let (_, boring_locals) = compute_relevant_live_locals(typeck.tcx(), &free_regions, body);
-        typeck.polonius_liveness.as_mut().unwrap().boring_nll_locals = boring_locals;
-        free_regions = typeck.universal_regions.universal_regions_iter().collect();
-    }
-    let (relevant_live_locals, boring_locals) =
-        compute_relevant_live_locals(typeck.tcx(), &free_regions, body);
-
-    trace::trace(
-        typeck,
-        body,
-        location_map,
-        flow_inits,
-        move_data,
-        relevant_live_locals,
-        boring_locals,
-    );
+    trace::trace(typeck, body, location_map, flow_inits, move_data, relevant_live_locals);
 
     // Mark regions that should be live where they appear within rvalues or within a call: like
     // args, regions, and types.
@@ -79,20 +64,17 @@ pub(super) fn generate<'a, 'tcx>(
 // region (i.e., where `R` may be valid for just a subset of the fn body).
 fn compute_relevant_live_locals<'tcx>(
     tcx: TyCtxt<'tcx>,
-    free_regions: &FxHashSet<RegionVid>,
     body: &Body<'tcx>,
-) -> (ThinBitSet<Local>, ThinBitSet<Local>) {
-    let mut boring_locals = ThinBitSet::new_empty(body.local_decls.len());
+    mut is_free_region: impl FnMut(RegionVid) -> bool,
+) -> ThinBitSet<Local> {
     let mut relevant_live_locals = ThinBitSet::new_empty(body.local_decls.len());
     for (local, local_decl) in body.local_decls.iter_enumerated() {
-        if tcx.all_free_regions_meet(&local_decl.ty, |r| free_regions.contains(&r.as_var())) {
-            boring_locals.insert(local);
-        } else {
+        if !tcx.all_free_regions_meet(&local_decl.ty, |r| is_free_region(r.as_var())) {
             relevant_live_locals.insert(local);
         }
     }
 
-    (relevant_live_locals, boring_locals)
+    relevant_live_locals
 }
 
 /// Computes all regions that are (currently) known to outlive free

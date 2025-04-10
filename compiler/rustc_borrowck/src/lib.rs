@@ -59,7 +59,6 @@ use crate::diagnostics::{
 use crate::path_utils::*;
 use crate::place_ext::PlaceExt;
 use crate::places_conflict::{PlaceConflictBias, places_conflict};
-use crate::polonius::PoloniusDiagnosticsContext;
 use crate::polonius::legacy::{PoloniusLocationTable, PoloniusOutput};
 use crate::prefixes::PrefixSet;
 use crate::region_infer::RegionInferenceContext;
@@ -198,7 +197,6 @@ fn do_mir_borrowck<'tcx>(
         polonius_output,
         opt_closure_req,
         nll_errors,
-        polonius_diagnostics,
     } = nll::compute_regions(
         &infcx,
         free_regions,
@@ -270,7 +268,6 @@ fn do_mir_borrowck<'tcx>(
             polonius_output: None,
             move_errors: Vec::new(),
             diags_buffer,
-            polonius_diagnostics: polonius_diagnostics.as_ref(),
             polonius_out_of_scope_computer: None, // FIXME: Not needed
         };
         struct MoveVisitor<'a, 'b, 'infcx, 'tcx> {
@@ -310,7 +307,6 @@ fn do_mir_borrowck<'tcx>(
         polonius_output,
         move_errors: Vec::new(),
         diags_buffer,
-        polonius_diagnostics: polonius_diagnostics.as_ref(),
         polonius_out_of_scope_computer: if tcx.sess.opts.unstable_opts.polonius.is_next_enabled() {
             Some(PoloniusOutOfScopePrecomputer::new(
                 tcx,
@@ -593,10 +589,6 @@ struct MirBorrowckCtxt<'a, 'infcx, 'tcx> {
 
     diags_buffer: &'a mut BorrowckDiagnosticsBuffer<'infcx, 'tcx>,
     move_errors: Vec<MoveError<'tcx>>,
-
-    /// When using `-Zpolonius=next`: the data used to compute errors and diagnostics.
-    #[expect(dead_code)]
-    polonius_diagnostics: Option<&'a PoloniusDiagnosticsContext>,
 
     polonius_out_of_scope_computer: Option<PoloniusOutOfScopePrecomputer<'a, 'tcx>>,
 }

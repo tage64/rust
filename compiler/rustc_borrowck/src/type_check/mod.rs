@@ -11,7 +11,6 @@ use rustc_hir as hir;
 use rustc_hir::def::DefKind;
 use rustc_hir::def_id::LocalDefId;
 use rustc_hir::lang_items::LangItem;
-use rustc_index::bit_set::thin_bit_set::ThinBitSet;
 use rustc_index::{IndexSlice, IndexVec};
 use rustc_infer::infer::canonical::QueryRegionConstraints;
 use rustc_infer::infer::outlives::env::RegionBoundPairs;
@@ -49,7 +48,6 @@ use crate::constraints::{OutlivesConstraint, OutlivesConstraintSet};
 use crate::diagnostics::UniverseInfo;
 use crate::member_constraints::MemberConstraintSet;
 use crate::polonius::legacy::{PoloniusFacts, PoloniusLocationTable};
-use crate::polonius::{PoloniusContext, PoloniusLivenessContext};
 use crate::region_infer::TypeTest;
 use crate::region_infer::values::{LivenessValues, PlaceholderIndex, PlaceholderIndices};
 use crate::session_diagnostics::{MoveUnsized, SimdIntrinsicArgConst};
@@ -147,14 +145,6 @@ pub(crate) fn type_check<'a, 'tcx>(
 
     debug!(?normalized_inputs_and_output);
 
-    let polonius_liveness = if infcx.tcx.sess.opts.unstable_opts.polonius.is_next_enabled() {
-        Some(PoloniusLivenessContext {
-            boring_nll_locals: ThinBitSet::new_empty(body.local_decls.len()),
-        })
-    } else {
-        None
-    };
-
     let mut typeck = TypeChecker {
         infcx,
         last_span: body.span,
@@ -169,7 +159,6 @@ pub(crate) fn type_check<'a, 'tcx>(
         polonius_facts,
         borrow_set,
         constraints: &mut constraints,
-        polonius_liveness,
     };
 
     typeck.check_user_type_annotations();
@@ -186,21 +175,7 @@ pub(crate) fn type_check<'a, 'tcx>(
     let opaque_type_values =
         opaque_types::take_opaques_and_register_member_constraints(&mut typeck);
 
-    // We're done with typeck, we can finalize the polonius liveness context for region inference.
-    let polonius_context = typeck.polonius_liveness.take().map(|liveness_context| {
-        PoloniusContext::create_from_liveness(
-            liveness_context,
-            infcx.num_region_vars(),
-            typeck.constraints.liveness_constraints.points(),
-        )
-    });
-
-    MirTypeckResults {
-        constraints,
-        universal_region_relations,
-        opaque_type_values,
-        polonius_context,
-    }
+    MirTypeckResults { constraints, universal_region_relations, opaque_type_values }
 }
 
 #[track_caller]
@@ -598,8 +573,6 @@ struct TypeChecker<'a, 'tcx> {
     polonius_facts: &'a mut Option<PoloniusFacts>,
     borrow_set: &'a BorrowSet<'tcx>,
     constraints: &'a mut MirTypeckRegionConstraints<'tcx>,
-    /// When using `-Zpolonius=next`, the liveness helper data used to create polonius constraints.
-    polonius_liveness: Option<PoloniusLivenessContext>,
 }
 
 /// Holder struct for passing results from MIR typeck to the rest of the non-lexical regions
@@ -608,7 +581,6 @@ pub(crate) struct MirTypeckResults<'tcx> {
     pub(crate) constraints: MirTypeckRegionConstraints<'tcx>,
     pub(crate) universal_region_relations: Frozen<UniversalRegionRelations<'tcx>>,
     pub(crate) opaque_type_values: FxIndexMap<OpaqueTypeKey<'tcx>, OpaqueHiddenType<'tcx>>,
-    pub(crate) polonius_context: Option<PoloniusContext>,
 }
 
 /// A collection of region constraints that must be satisfied for the

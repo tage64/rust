@@ -45,7 +45,6 @@ pub(super) fn trace<'a, 'tcx>(
     flow_inits: ResultsCursor<'a, 'tcx, MaybeInitializedPlaces<'a, 'tcx>>,
     move_data: &MoveData<'tcx>,
     relevant_live_locals: ThinBitSet<Local>,
-    boring_locals: ThinBitSet<Local>,
 ) {
     let local_use_map = &LocalUseMap::build(&relevant_live_locals, location_map, body);
     let cx = LivenessContext {
@@ -64,7 +63,9 @@ pub(super) fn trace<'a, 'tcx>(
 
     results.compute_for_all_locals(relevant_live_locals.iter());
 
-    results.dropck_boring_locals(boring_locals.iter());
+    // Boring locals are the locals that are not relevant.
+    let boring_locals = body.local_decls.indices().filter(|&l| !relevant_live_locals.contains(l));
+    results.dropck_boring_locals(boring_locals);
 }
 
 /// Contextual state for the type-liveness coroutine.
