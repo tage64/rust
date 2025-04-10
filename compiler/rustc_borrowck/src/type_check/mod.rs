@@ -11,6 +11,7 @@ use rustc_hir as hir;
 use rustc_hir::def::DefKind;
 use rustc_hir::def_id::LocalDefId;
 use rustc_hir::lang_items::LangItem;
+use rustc_index::bit_set::thin_bit_set::ThinBitSet;
 use rustc_index::{IndexSlice, IndexVec};
 use rustc_infer::infer::canonical::QueryRegionConstraints;
 use rustc_infer::infer::outlives::env::RegionBoundPairs;
@@ -147,7 +148,9 @@ pub(crate) fn type_check<'a, 'tcx>(
     debug!(?normalized_inputs_and_output);
 
     let polonius_liveness = if infcx.tcx.sess.opts.unstable_opts.polonius.is_next_enabled() {
-        Some(PoloniusLivenessContext::default())
+        Some(PoloniusLivenessContext {
+            boring_nll_locals: ThinBitSet::new_empty(body.local_decls.len()),
+        })
     } else {
         None
     };

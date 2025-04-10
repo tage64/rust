@@ -57,6 +57,7 @@ use std::collections::BTreeMap;
 
 use rustc_data_structures::fx::FxHashSet;
 use rustc_index::bit_set::SparseBitMatrix;
+use rustc_index::bit_set::thin_bit_set::ThinBitSet;
 use rustc_index::interval::SparseIntervalMatrix;
 use rustc_middle::mir::{Body, Local};
 use rustc_middle::ty::{RegionVid, TyCtxt};
@@ -73,17 +74,12 @@ pub(crate) type LiveLoans = SparseBitMatrix<PointIndex, BorrowIndex>;
 
 /// This struct holds the liveness data created during MIR typeck, and which will be used later in
 /// the process, to compute the polonius localized constraints.
-#[derive(Default)]
 pub(crate) struct PoloniusLivenessContext {
-    /// The expected edge direction per live region: the kind of directed edge we'll create as
-    /// liveness constraints depends on the variance of types with respect to each contained region.
-    pub(crate) live_region_variances: BTreeMap<RegionVid, ConstraintDirection>,
-
     /// The regions that outlive free regions are used to distinguish relevant live locals from
     /// boring locals. A boring local is one whose type contains only such regions. Polonius
     /// currently has more boring locals than NLLs so we record the latter to use in errors and
     /// diagnostics, to focus on the locals we consider relevant and match NLL diagnostics.
-    pub(crate) boring_nll_locals: FxHashSet<Local>,
+    pub(crate) boring_nll_locals: ThinBitSet<Local>,
 }
 
 /// This struct holds the data needed to create the Polonius localized constraints. Its data is
@@ -101,7 +97,7 @@ pub(crate) struct PoloniusContext {
 /// computed from the [PoloniusContext] when computing NLL regions.
 pub(crate) struct PoloniusDiagnosticsContext {
     /// The liveness data computed during MIR typeck: [PoloniusLivenessContext::boring_nll_locals].
-    pub(crate) boring_nll_locals: FxHashSet<Local>,
+    pub(crate) boring_nll_locals: ThinBitSet<Local>,
 }
 
 /// The direction a constraint can flow into. Used to create liveness constraints according to
@@ -157,8 +153,7 @@ impl PoloniusContext {
         body: &Body<'tcx>,
         borrow_set: &BorrowSet<'tcx>,
     ) -> PoloniusDiagnosticsContext {
-        let PoloniusLivenessContext { live_region_variances, boring_nll_locals } =
-            self.liveness_context;
+        let PoloniusLivenessContext { boring_nll_locals } = self.liveness_context;
 
         /*  Deactivates old Polonius
         let mut localized_outlives_constraints = LocalizedOutlivesConstraintSet::default();

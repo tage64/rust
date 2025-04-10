@@ -595,6 +595,7 @@ struct MirBorrowckCtxt<'a, 'infcx, 'tcx> {
     move_errors: Vec<MoveError<'tcx>>,
 
     /// When using `-Zpolonius=next`: the data used to compute errors and diagnostics.
+    #[expect(dead_code)]
     polonius_diagnostics: Option<&'a PoloniusDiagnosticsContext>,
 
     polonius_out_of_scope_computer: Option<PoloniusOutOfScopePrecomputer<'a, 'tcx>>,

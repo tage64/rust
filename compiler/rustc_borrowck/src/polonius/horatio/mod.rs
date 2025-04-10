@@ -12,7 +12,7 @@ use rustc_data_structures::fx::FxHashMap;
 use rustc_index::bit_set::thin_bit_set::{SparseBitMatrix, ThinBitSet};
 use rustc_index::{Idx, IndexVec};
 use rustc_middle::mir::{
-    self, BasicBlock, BasicBlockData, Body, Location, Place, Statement, Terminator,
+    self, BasicBlock, BasicBlockData, Body, Local, Location, Place, Statement, Terminator,
 };
 use rustc_middle::ty::TyCtxt;
 use rustc_mir_dataflow::points::DenseLocationMap;
@@ -52,7 +52,7 @@ pub(crate) use my_print;
 type KillsCache = IndexVec<PoloniusBlock, Option<KillAtBlock>>;
 
 pub(crate) struct PoloniusOutOfScopePrecomputer<'a, 'tcx> {
-    pcx: PoloniusContext<'a, 'tcx>,
+    pub pcx: PoloniusContext<'a, 'tcx>,
     borrows: IndexVec<BorrowIndex, Option<PoloniusBorrowData>>,
 }
 
@@ -96,6 +96,13 @@ pub(crate) struct PoloniusContext<'a, 'tcx> {
     // FIXME: This is equivalent to `BasicBlocks.predecessors` but uses bit sets instead of
     // `SmallVec`. Maybe that should be replaced by this.
     adjacent_predecessors: IndexVec<BasicBlock, ThinBitSet<BasicBlock>>,
+
+    /// Only computed for diagnostics: The regions that outlive free regions are used to distinguish
+    /// relevant live locals from boring locals. A boring local is one whose type contains only such
+    /// regions. Polonius currently has more boring locals than NLLs so we record the latter to use
+    /// in errors and diagnostics, to focus on the locals we consider relevant and match NLL
+    /// diagnostics.
+    boring_nll_locals: OnceCell<ThinBitSet<Local>>,
 
     tcx: TyCtxt<'tcx>,
     regioncx: &'a RegionInferenceContext<'tcx>,
@@ -353,6 +360,7 @@ impl<'a, 'tcx> PoloniusContext<'a, 'tcx> {
             cache: OnceCell::new(),
             transitive_predecessors,
             adjacent_predecessors,
+            boring_nll_locals: OnceCell::new(),
             tcx,
             regioncx,
             body,
@@ -378,6 +386,32 @@ impl<'a, 'tcx> PoloniusContext<'a, 'tcx> {
 
             Cache { backward_regions, constraints }
         })
+    }
+
+    fn boring_nll_locals(&self) -> &ThinBitSet<Local> {
+        self.boring_nll_locals.get_or_init(|| {
+            let mut free_regions = new_empty_region_set(self.regioncx);
+            for region in self.regioncx.universal_regions().universal_regions_iter() {
+                free_regions.insert(region);
+            }
+            self.cache().constraints.add_dependent_regions_reversed(&mut free_regions);
+
+            let mut boring_locals = ThinBitSet::new_empty(self.body.local_decls.len());
+            for (local, local_decl) in self.body.local_decls.iter_enumerated() {
+                if self
+                    .tcx
+                    .all_free_regions_meet(&local_decl.ty, |r| free_regions.contains(r.as_var()))
+                {
+                    boring_locals.insert(local);
+                }
+            }
+
+            boring_locals
+        })
+    }
+
+    pub(crate) fn is_boring_local(&self, local: Local) -> bool {
+        self.boring_nll_locals().contains(local)
     }
 
     /// Returns `true` iff `a` is earlier in the control flow graph than `b`.

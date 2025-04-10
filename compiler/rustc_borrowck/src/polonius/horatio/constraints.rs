@@ -396,7 +396,6 @@ impl<'a, 'tcx> Constraints<'a, 'tcx> {
     /// - `'b: 'd`
     /// - `'d: 'e`
     /// Then `'c`, `'d` and `'e` will be added to the set.
-    #[inline(never)] // FIXME: Remove this.
     pub(crate) fn add_dependent_regions(&self, regions: &mut ThinBitSet<RegionVid>) {
         // This function will loop until there are no more regions to add. It will keep a set of
         // regions that has not been considered yet (the `to_check` variable). At each iteration of
@@ -430,6 +429,42 @@ impl<'a, 'tcx> Constraints<'a, 'tcx> {
                 }
                 if regions.insert(constraint.sub) {
                     to_check_next_round.insert(constraint.sub);
+                }
+            }
+
+            mem::swap(&mut to_check, &mut to_check_next_round);
+            to_check_next_round.clear();
+        }
+    }
+
+    /// Like `add_dependent_regions()` but with constraints reversed.
+    // FIXME: Could these functions be merged to avoid code duplication.
+    pub(crate) fn add_dependent_regions_reversed(&self, regions: &mut ThinBitSet<RegionVid>) {
+        // See the `add_dependent_regions()` function for an explonation of the code. The functions
+        // are identical except that we swapped sub and sup.
+
+        let mut to_check = regions.clone();
+        let mut to_check_next_round = new_empty_region_set(self.regioncx);
+
+        // Loop till the fixpoint: when there are no more regions to add.
+        while !to_check.is_empty() {
+            // Loop through all global constraints.
+            for constraint in &self.global_constraints {
+                if !to_check.contains(constraint.sub) {
+                    continue;
+                }
+                if regions.insert(constraint.sup) {
+                    to_check_next_round.insert(constraint.sup);
+                }
+            }
+
+            // Loop through all local constraints.
+            for constraint in self.local_constraints.iter().flatten() {
+                if !to_check.contains(constraint.sub) {
+                    continue;
+                }
+                if regions.insert(constraint.sup) {
+                    to_check_next_round.insert(constraint.sup);
                 }
             }
 
