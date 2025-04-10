@@ -112,8 +112,8 @@ pub(crate) struct PoloniusContext<'a, 'tcx> {
 }
 
 struct Cache<'a, 'tcx> {
-    /// All regions that flows backward.
-    backward_regions: ThinBitSet<RegionVid>,
+    /// All universal regions.
+    universal_regions: ThinBitSet<RegionVid>,
 
     /// All outlives constraints.
     constraints: Constraints<'a, 'tcx>,
@@ -371,12 +371,9 @@ impl<'a, 'tcx> PoloniusContext<'a, 'tcx> {
 
     fn cache(&self) -> &Cache<'a, 'tcx> {
         self.cache.get_or_init(|| {
-            let mut backward_regions = new_empty_region_set(self.regioncx);
-            for region in (0..num_regions(self.regioncx)).map(RegionVid::from_usize) {
-                if !self.regioncx.universal_regions().is_universal_region(region) {
-                    backward_regions.insert(region);
-                }
-            }
+            let mut universal_regions = new_empty_region_set(self.regioncx);
+            universal_regions
+                .insert_range(self.regioncx.universal_regions().universal_regions_range());
 
             let mut constraints =
                 Constraints::new(self.tcx, self.regioncx, self.body, self.location_map);
@@ -384,7 +381,7 @@ impl<'a, 'tcx> PoloniusContext<'a, 'tcx> {
                 constraints.add_constraint(&constraint);
             }
 
-            Cache { backward_regions, constraints }
+            Cache { universal_regions, constraints }
         })
     }
 
@@ -836,7 +833,7 @@ impl ScopeComputation {
                     // Check if any regions should be added to `new_node`.
                     let mut added_regions = associated_regions.clone();
                     if !is_forward {
-                        added_regions.intersect(&bcx.pcx.cache().backward_regions);
+                        added_regions.subtract(&bcx.pcx.cache().universal_regions);
                     }
 
                     remove_dead_regions(bcx.pcx, new_location, &mut added_regions);
