@@ -583,15 +583,6 @@ impl<'tcx> LivenessContext<'_, '_, '_, 'tcx> {
                 typeck.constraints.liveness_constraints.add_points(live_region_vid, live_at);
             },
         });
-
-        // When using `-Zpolonius=next`, we record the variance of each live region.
-        if let Some(polonius_liveness) = typeck.polonius_liveness.as_mut() {
-            polonius_liveness.record_live_region_variance(
-                typeck.infcx.tcx,
-                typeck.universal_regions,
-                value,
-            );
-        }
     }
 
     fn compute_drop_data(
