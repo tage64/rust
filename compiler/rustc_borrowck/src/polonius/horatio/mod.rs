@@ -539,12 +539,16 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
             return false;
         };
 
-        scope_computation.get_or_insert_with(|| ScopeComputation::new(bcx)).compute(
-            bcx,
-            kills_cache,
-            location,
-            live_paths,
-        )
+        if self.pcx.tcx.sess.opts.unstable_opts.polonius.is_next_enabled() {
+            scope_computation.get_or_insert_with(|| ScopeComputation::new(bcx)).compute(
+                bcx,
+                kills_cache,
+                location,
+                live_paths,
+            )
+        } else {
+            true
+        }
     }
 }
 
@@ -567,8 +571,9 @@ fn is_killed(
     }
     // The answer was not known so we have to compute it ourselfs.
 
-    let is_kill =
-        if let Some(stmt) = bcx.pcx.body[location.block].statements.get(location.statement_index) {
+    let is_kill = !bcx.pcx.regioncx.region_contains(bcx.borrow.region, location)
+        || if let Some(stmt) = bcx.pcx.body[location.block].statements.get(location.statement_index)
+        {
             is_killed_at_stmt(bcx, stmt)
         } else {
             is_killed_at_terminator(bcx, &bcx.pcx.body[location.block].terminator())
@@ -592,13 +597,16 @@ fn is_killed_at_block(
     let res = kills_cache.get_or_insert_with(block, || {
         let block_data = &bcx.pcx.body[block.basic_block(bcx)];
         for statement_index in block.first_index(bcx)..=block.last_index(bcx) {
-            let is_killed = if let Some(stmt) = block_data.statements.get(statement_index) {
-                is_killed_at_stmt(bcx, stmt)
-            } else {
-                is_killed_at_terminator(bcx, &block_data.terminator())
-            };
+            let location = Location { statement_index, block: block.basic_block(bcx) };
 
-            if is_killed {
+            let is_kill = !bcx.pcx.regioncx.region_contains(bcx.borrow.region, location)
+                || if let Some(stmt) = block_data.statements.get(statement_index) {
+                    is_killed_at_stmt(bcx, stmt)
+                } else {
+                    is_killed_at_terminator(bcx, &block_data.terminator())
+                };
+
+            if is_kill {
                 return Killed { statement_index };
             }
         }

@@ -307,7 +307,8 @@ fn do_mir_borrowck<'tcx>(
         polonius_output,
         move_errors: Vec::new(),
         diags_buffer,
-        polonius_out_of_scope_computer: if tcx.sess.opts.unstable_opts.polonius.is_next_enabled() {
+        polonius_out_of_scope_computer: if !tcx.sess.opts.unstable_opts.polonius.is_legacy_enabled()
+        {
             Some(PoloniusOutOfScopePrecomputer::new(
                 tcx,
                 &regioncx,
