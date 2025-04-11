@@ -484,11 +484,9 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
             Some(PoloniusBorrowData::Data { scope_computation: None, .. }) => (),
         };
 
-        /*
         if !self.pcx.regioncx.region_contains(borrow.region, location) {
             return false;
         }
-        */
 
         return true;
     }
