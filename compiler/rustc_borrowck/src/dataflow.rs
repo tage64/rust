@@ -571,7 +571,7 @@ impl<'tcx> rustc_mir_dataflow::Analysis<'tcx> for Borrows<'_, 'tcx> {
     const NAME: &'static str = "borrows";
 
     fn bottom_value(&self, _: &mir::Body<'tcx>) -> Self::Domain {
-        if self.tcx.sess.opts.unstable_opts.polonius.is_next_enabled() {
+        if !self.tcx.sess.opts.unstable_opts.polonius.is_legacy_enabled() {
             return DenseBitSet::new_empty(0);
         }
 
@@ -590,7 +590,7 @@ impl<'tcx> rustc_mir_dataflow::Analysis<'tcx> for Borrows<'_, 'tcx> {
         _statement: &mir::Statement<'tcx>,
         location: Location,
     ) {
-        if self.tcx.sess.opts.unstable_opts.polonius.is_next_enabled() {
+        if !self.tcx.sess.opts.unstable_opts.polonius.is_legacy_enabled() {
             return;
         }
 
@@ -603,7 +603,7 @@ impl<'tcx> rustc_mir_dataflow::Analysis<'tcx> for Borrows<'_, 'tcx> {
         stmt: &mir::Statement<'tcx>,
         location: Location,
     ) {
-        if self.tcx.sess.opts.unstable_opts.polonius.is_next_enabled() {
+        if !self.tcx.sess.opts.unstable_opts.polonius.is_legacy_enabled() {
             return;
         }
 
@@ -656,7 +656,7 @@ impl<'tcx> rustc_mir_dataflow::Analysis<'tcx> for Borrows<'_, 'tcx> {
         _terminator: &mir::Terminator<'tcx>,
         location: Location,
     ) {
-        if self.tcx.sess.opts.unstable_opts.polonius.is_next_enabled() {
+        if !self.tcx.sess.opts.unstable_opts.polonius.is_legacy_enabled() {
             return;
         }
 
@@ -669,7 +669,7 @@ impl<'tcx> rustc_mir_dataflow::Analysis<'tcx> for Borrows<'_, 'tcx> {
         terminator: &'mir mir::Terminator<'tcx>,
         _location: Location,
     ) -> TerminatorEdges<'mir, 'tcx> {
-        if self.tcx.sess.opts.unstable_opts.polonius.is_next_enabled() {
+        if !self.tcx.sess.opts.unstable_opts.polonius.is_legacy_enabled() {
             return terminator.edges();
         }
 

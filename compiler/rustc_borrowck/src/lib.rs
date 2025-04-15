@@ -423,7 +423,7 @@ fn get_borrow_flow_results<'a, 'tcx>(
     borrow_set: &'a BorrowSet<'tcx>,
     regioncx: &RegionInferenceContext<'tcx>,
 ) -> Results<'tcx, Borrows<'a, 'tcx>> {
-    if !tcx.sess.opts.unstable_opts.polonius.is_next_enabled() {
+    if tcx.sess.opts.unstable_opts.polonius.is_legacy_enabled() {
         Borrows::new(tcx, body, regioncx, borrow_set).iterate_to_fixpoint(
             tcx,
             body,

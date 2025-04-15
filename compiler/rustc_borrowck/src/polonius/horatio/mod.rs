@@ -289,9 +289,7 @@ impl<'a, 'b, 'tcx> BorrowContext<'a, 'b, 'tcx> {
     }
 
     fn has_live_region_at(&self, location: Location) -> bool {
-        let mut dependent_regions = self.dependent_regions().clone();
-        remove_dead_regions(self.pcx, location, &mut dependent_regions);
-        !dependent_regions.is_empty()
+        self.pcx.regioncx.region_contains(self.borrow.region, location)
     }
 }
 
