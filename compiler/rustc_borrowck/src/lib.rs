@@ -1199,6 +1199,7 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, '_, 'tcx> {
         false
     }
 
+    #[inline]
     fn borrow_maybe_in_scope_at(
         &mut self,
         borrow_idx: BorrowIndex,

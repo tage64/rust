@@ -308,6 +308,7 @@ impl<'a, 'tcx> Polonius<'a, 'tcx> {
     }
 
     /// Quick check to check if the loan is in scope.
+    #[inline]
     pub(crate) fn loan_maybe_in_scope_at(
         &mut self,
         borrow_idx: BorrowIndex,
@@ -316,6 +317,12 @@ impl<'a, 'tcx> Polonius<'a, 'tcx> {
     ) -> bool {
         // Check if this location can never be reached by the borrow.
         if !self.pcx.is_predecessor(borrow.reserve_location(), location) {
+            return false;
+        }
+
+        let bcx = BorrowContext { pcx: &self.pcx, borrow_idx, borrow };
+
+        if !bcx.has_live_region_at(location) {
             return false;
         }
 
@@ -351,12 +358,11 @@ impl<'a, 'tcx> Polonius<'a, 'tcx> {
             Some(PoloniusBorrowData::Data { scope_computation: None, .. }) => (),
         };
 
-        let bcx = BorrowContext { pcx: &self.pcx, borrow_idx, borrow };
-
-        bcx.has_live_region_at(location)
+        true
     }
 
     /// Check if a loan is in scope at a location.
+    #[inline(never)] // Remove this.
     pub(crate) fn loan_in_scope_at(
         &mut self,
         borrow_idx: BorrowIndex,
