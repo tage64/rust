@@ -424,6 +424,21 @@ impl<'a, 'b, 'tcx> BorrowContext<'a, 'b, 'tcx> {
     fn new_polonius_block_set(self) -> ThinBitSet<PoloniusBlock> {
         ThinBitSet::new_empty(PoloniusBlock::num_blocks(self))
     }
+
+    fn dependent_regions(&self) -> &ThinBitSet<RegionVid> {
+        self.borrow.dependent_regions.get_or_init(|| {
+            let mut dependent_regions = new_empty_region_set(self.pcx.regioncx);
+            dependent_regions.insert(self.borrow.region);
+            self.pcx.cache().constraints.add_dependent_regions(&mut dependent_regions);
+            dependent_regions
+        })
+    }
+
+    fn has_live_region_at(&self, location: Location) -> bool {
+        let mut dependent_regions = self.dependent_regions().clone();
+        remove_dead_regions(self.pcx, location, &mut dependent_regions);
+        !dependent_regions.is_empty()
+    }
 }
 
 impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
@@ -484,11 +499,9 @@ impl<'a, 'tcx> PoloniusOutOfScopePrecomputer<'a, 'tcx> {
             Some(PoloniusBorrowData::Data { scope_computation: None, .. }) => (),
         };
 
-        if !self.pcx.regioncx.region_contains(borrow.region, location) {
-            return false;
-        }
+        let bcx = BorrowContext { pcx: &self.pcx, borrow_idx, borrow };
 
-        return true;
+        bcx.has_live_region_at(location)
     }
 
     /// Check if a loan is in scope at a location.
@@ -571,7 +584,7 @@ fn is_killed(
     }
     // The answer was not known so we have to compute it ourselfs.
 
-    let is_kill = !bcx.pcx.regioncx.region_contains(bcx.borrow.region, location)
+    let is_kill = !bcx.has_live_region_at(location)
         || if let Some(stmt) = bcx.pcx.body[location.block].statements.get(location.statement_index)
         {
             is_killed_at_stmt(bcx, stmt)
@@ -599,7 +612,7 @@ fn is_killed_at_block(
         for statement_index in block.first_index(bcx)..=block.last_index(bcx) {
             let location = Location { statement_index, block: block.basic_block(bcx) };
 
-            let is_kill = !bcx.pcx.regioncx.region_contains(bcx.borrow.region, location)
+            let is_kill = !bcx.has_live_region_at(location)
                 || if let Some(stmt) = block_data.statements.get(statement_index) {
                     is_killed_at_stmt(bcx, stmt)
                 } else {

@@ -1,8 +1,10 @@
+use std::cell::OnceCell;
 use std::fmt;
 use std::ops::Index;
 
 use rustc_data_structures::fx::{FxIndexMap, FxIndexSet};
 use rustc_index::bit_set::DenseBitSet;
+use rustc_index::bit_set::thin_bit_set::ThinBitSet;
 use rustc_middle::mir::visit::{MutatingUseContext, NonUseContext, PlaceContext, Visitor};
 use rustc_middle::mir::{self, Body, Local, Location, traversal};
 use rustc_middle::span_bug;
@@ -84,6 +86,7 @@ pub struct BorrowData<'tcx> {
     pub(crate) borrowed_place: mir::Place<'tcx>,
     /// Place to which the borrow was stored
     pub(crate) assigned_place: mir::Place<'tcx>,
+    pub(crate) dependent_regions: OnceCell<ThinBitSet<RegionVid>>,
 }
 
 // These methods are public to support borrowck consumers.
@@ -261,6 +264,7 @@ impl<'a, 'tcx> Visitor<'tcx> for GatherBorrows<'a, 'tcx> {
                 activation_location: TwoPhaseActivation::NotTwoPhase,
                 borrowed_place,
                 assigned_place: *assigned_place,
+                dependent_regions: OnceCell::new(),
             };
             let (idx, _) = self.location_map.insert_full(location, borrow);
             let idx = BorrowIndex::from(idx);
