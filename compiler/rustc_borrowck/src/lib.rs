@@ -20,7 +20,7 @@ use std::cell::RefCell;
 use std::marker::PhantomData;
 use std::ops::{ControlFlow, Deref};
 
-use polonius::horatio::PoloniusOutOfScopePrecomputer;
+use polonius::horatio::Polonius;
 use rustc_abi::FieldIdx;
 use rustc_data_structures::fx::{FxIndexMap, FxIndexSet};
 use rustc_data_structures::graph::dominators::Dominators;
@@ -268,7 +268,7 @@ fn do_mir_borrowck<'tcx>(
             polonius_output: None,
             move_errors: Vec::new(),
             diags_buffer,
-            polonius_out_of_scope_computer: None, // FIXME: Not needed
+            polonius: None, // FIXME: Not needed
         };
         struct MoveVisitor<'a, 'b, 'infcx, 'tcx> {
             ctxt: &'a mut MirBorrowckCtxt<'b, 'infcx, 'tcx>,
@@ -307,15 +307,8 @@ fn do_mir_borrowck<'tcx>(
         polonius_output,
         move_errors: Vec::new(),
         diags_buffer,
-        polonius_out_of_scope_computer: if !tcx.sess.opts.unstable_opts.polonius.is_legacy_enabled()
-        {
-            Some(PoloniusOutOfScopePrecomputer::new(
-                tcx,
-                &regioncx,
-                body,
-                &regioncx.location_map,
-                &borrow_set,
-            ))
+        polonius: if !tcx.sess.opts.unstable_opts.polonius.is_legacy_enabled() {
+            Some(Polonius::new(tcx, &regioncx, body, &regioncx.location_map, &borrow_set))
         } else {
             None
         },
@@ -392,20 +385,7 @@ fn get_flow_results<'a, 'tcx>(
 ) -> Results<'tcx, Borrowck<'a, 'tcx>> {
     // We compute these three analyses individually, but them combine them into
     // a single results so that `mbcx` can visit them all together.
-    let borrows = if !tcx.sess.opts.unstable_opts.polonius.is_next_enabled() {
-        Borrows::new(tcx, body, regioncx, borrow_set).iterate_to_fixpoint(
-            tcx,
-            body,
-            Some("borrowck"),
-        )
-    } else {
-        // Currently, Polonius computes the scopes of borrows with a lazy top-down strategy, so this
-        // is not needed.
-        Results {
-            analysis: Borrows::dummy(tcx, body, borrow_set),
-            entry_states: IndexVec::from_elem_n(DenseBitSet::new_empty(0), body.basic_blocks.len()),
-        }
-    };
+    let borrows = get_borrow_flow_results(tcx, body, borrow_set, regioncx);
 
     let uninits = MaybeUninitializedPlaces::new(tcx, body, move_data).iterate_to_fixpoint(
         tcx,
@@ -432,6 +412,31 @@ fn get_flow_results<'a, 'tcx>(
             .collect();
 
     Results { analysis, entry_states }
+}
+
+// FIXME: This was only factored out from `get_flow_results` to be able to count instructions
+// separately.
+#[inline(never)]
+fn get_borrow_flow_results<'a, 'tcx>(
+    tcx: TyCtxt<'tcx>,
+    body: &'a Body<'tcx>,
+    borrow_set: &'a BorrowSet<'tcx>,
+    regioncx: &RegionInferenceContext<'tcx>,
+) -> Results<'tcx, Borrows<'a, 'tcx>> {
+    if !tcx.sess.opts.unstable_opts.polonius.is_next_enabled() {
+        Borrows::new(tcx, body, regioncx, borrow_set).iterate_to_fixpoint(
+            tcx,
+            body,
+            Some("borrowck"),
+        )
+    } else {
+        // Currently, Polonius computes the scopes of borrows with a lazy top-down strategy, so this
+        // is not needed.
+        Results {
+            analysis: Borrows::dummy(tcx, body, borrow_set),
+            entry_states: IndexVec::from_elem_n(DenseBitSet::new_empty(0), body.basic_blocks.len()),
+        }
+    }
 }
 
 pub(crate) struct BorrowckInferCtxt<'tcx> {
@@ -591,7 +596,7 @@ struct MirBorrowckCtxt<'a, 'infcx, 'tcx> {
     diags_buffer: &'a mut BorrowckDiagnosticsBuffer<'infcx, 'tcx>,
     move_errors: Vec<MoveError<'tcx>>,
 
-    polonius_out_of_scope_computer: Option<PoloniusOutOfScopePrecomputer<'a, 'tcx>>,
+    polonius: Option<Polonius<'a, 'tcx>>,
 }
 
 // Check that:
@@ -1200,7 +1205,7 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, '_, 'tcx> {
         borrow: &BorrowData<'tcx>,
         location: Location,
     ) -> bool {
-        if let Some(ref mut scopes_computer) = self.polonius_out_of_scope_computer {
+        if let Some(ref mut scopes_computer) = self.polonius {
             scopes_computer.loan_maybe_in_scope_at(borrow_idx, borrow, location)
         } else {
             true
@@ -1219,8 +1224,8 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, '_, 'tcx> {
         borrow: &BorrowData<'tcx>,
         location: Location,
     ) -> bool {
-        if let Some(ref mut scopes_computer) = self.polonius_out_of_scope_computer {
-            scopes_computer.loan_in_scope_at(borrow_idx, borrow, location)
+        if let Some(ref mut polonius) = self.polonius {
+            polonius.loan_in_scope_at(borrow_idx, borrow, location)
         } else {
             let borrows_in_scope = self.borrows_in_scope(location, state);
             borrows_in_scope.contains(borrow_idx)

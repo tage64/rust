@@ -571,9 +571,10 @@ impl<'tcx> RegionInferenceContext<'tcx> {
         self.definitions.indices()
     }
 
-    /// Returns the largest region variable ID.
-    pub(crate) fn last_region_vid(&self) -> Option<RegionVid> {
-        self.definitions.last_index()
+    /// Returns the total number of regions.
+    #[inline]
+    pub fn num_regions(&self) -> usize {
+        self.definitions.len()
     }
 
     /// Given a universal region in scope on the MIR, returns the
