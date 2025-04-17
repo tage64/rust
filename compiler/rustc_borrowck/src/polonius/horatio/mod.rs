@@ -20,8 +20,8 @@ use smallvec::{SmallVec, smallvec};
 
 use super::ConstraintDirection;
 use crate::{
-    BorrowData, BorrowIndex, BorrowSet, NllRegionVariableOrigin, PlaceConflictBias, PlaceExt,
-    RegionInferenceContext, RegionVid, places_conflict,
+    BorrowData, BorrowIndex, BorrowSet, PlaceConflictBias, PlaceExt, RegionInferenceContext,
+    RegionVid, places_conflict,
 };
 
 /// This toggles the `my_println!` and `my_print!` macros. Those macros are used here and there to
@@ -633,12 +633,7 @@ fn remove_dead_regions(
     region_set: &mut ThinBitSet<RegionVid>,
 ) {
     for region in region_set.clone().iter() {
-        if !pcx.regioncx.liveness_constraints().is_live_at(region, location)
-            && !matches!(
-                pcx.regioncx.region_definition(region).origin,
-                NllRegionVariableOrigin::FreeRegion,
-            )
-        {
+        if !pcx.regioncx.liveness_constraints().is_live_at(region, location) {
             region_set.remove(region);
         }
     }

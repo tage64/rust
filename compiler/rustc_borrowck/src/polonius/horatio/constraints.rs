@@ -11,7 +11,7 @@ use rustc_mir_dataflow::points::{DenseLocationMap, PointIndex};
 
 use crate::constraints::OutlivesConstraint;
 use crate::type_check::Locations;
-use crate::{NllRegionVariableOrigin, RegionInferenceContext, RegionVid};
+use crate::{RegionInferenceContext, RegionVid};
 
 /// Outlives constraints organized by the point in the CFG where they take effect.
 ///
@@ -171,19 +171,9 @@ impl<'a, 'tcx> Constraints<'a, 'tcx> {
         body: &'a Body<'tcx>,
         location_map: &'a DenseLocationMap,
     ) -> Self {
-        let mut global_constraints = Vec::new();
-        for region in regioncx.regions() {
-            if let NllRegionVariableOrigin::FreeRegion = regioncx.region_definition(region).origin {
-                global_constraints.push(GlobalConstraint {
-                    sup: region,
-                    sub: regioncx.universal_regions().fr_static,
-                });
-            }
-        }
-
         Self {
             local_constraints: IndexVec::from_elem_n(vec![], location_map.num_points()),
-            global_constraints,
+            global_constraints: vec![],
             tcx,
             regioncx,
             body,
