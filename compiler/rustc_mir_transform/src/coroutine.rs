@@ -199,6 +199,9 @@ struct TransformVisitor<'tcx> {
     old_yield_ty: Ty<'tcx>,
 
     old_ret_ty: Ty<'tcx>,
+
+    /// The number of locals in the [`Body`].
+    n_locals: usize,
 }
 
 impl<'tcx> TransformVisitor<'tcx> {
@@ -428,7 +431,7 @@ impl<'tcx> MutVisitor<'tcx> for TransformVisitor<'tcx> {
                 let storage_liveness: GrowableBitSet<Local> =
                     self.storage_liveness[block].clone().unwrap().into();
 
-                for i in 0..self.always_live_locals.domain_size() {
+                for i in 0..self.n_locals {
                     let l = Local::new(i);
                     let needs_storage_dead = storage_liveness.contains(l)
                         && !self.remap.contains(l)
@@ -819,8 +822,6 @@ fn compute_storage_conflicts<'mir, 'tcx>(
     always_live_locals: DenseBitSet<Local>,
     mut requires_storage: Results<'tcx, MaybeRequiresStorage<'mir, 'tcx>>,
 ) -> BitMatrix<CoroutineSavedLocal, CoroutineSavedLocal> {
-    assert_eq!(body.local_decls.len(), saved_locals.domain_size());
-
     debug!("compute_storage_conflicts({:?})", body.span);
     debug!("always_live = {:?}", always_live_locals);
 
@@ -833,7 +834,11 @@ fn compute_storage_conflicts<'mir, 'tcx>(
     let mut visitor = StorageConflictVisitor {
         body,
         saved_locals,
-        local_conflicts: BitMatrix::from_row_n(&ineligible_locals, body.local_decls.len()),
+        local_conflicts: BitMatrix::from_row_n(
+            &ineligible_locals,
+            body.local_decls.len(),
+            body.local_decls.len(),
+        ),
         eligible_storage_live: DenseBitSet::new_empty(body.local_decls.len()),
     };
 
@@ -984,7 +989,7 @@ fn compute_layout<'tcx>(
     // Create a map from local indices to coroutine struct indices.
     let mut variant_fields: IndexVec<VariantIdx, IndexVec<FieldIdx, CoroutineSavedLocal>> =
         iter::repeat(IndexVec::new()).take(CoroutineArgs::RESERVED_VARIANTS).collect();
-    let mut remap = IndexVec::from_elem_n(None, saved_locals.domain_size());
+    let mut remap = IndexVec::from_elem_n(None, body.local_decls.len());
     for (suspension_point_idx, live_locals) in live_locals_at_suspension_points.iter().enumerate() {
         let variant_index =
             VariantIdx::from(CoroutineArgs::RESERVED_VARIANTS + suspension_point_idx);
@@ -1646,6 +1651,7 @@ impl<'tcx> crate::MirPass<'tcx> for StateTransform {
             discr_ty,
             old_ret_ty,
             old_yield_ty,
+            n_locals: body.local_decls.len(),
         };
         transform.visit_body(body);
 

@@ -111,7 +111,7 @@ where
     #[cfg(test)]
     pub(crate) fn allow_unreachable(&mut self) {
         #[cfg(debug_assertions)]
-        self.reachable_blocks.insert_all()
+        self.reachable_blocks.insert_all(self.body().basic_blocks.len())
     }
 
     /// Returns the underlying `Results`.
