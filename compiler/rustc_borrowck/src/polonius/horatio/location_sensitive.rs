@@ -1,5 +1,5 @@
 use rustc_data_structures::fx::FxHashMap;
-use rustc_index::bit_set::thin_bit_set::ThinBitSet;
+use rustc_index::bit_set::DenseBitSet;
 use rustc_middle::mir::{BasicBlockData, Location};
 
 use super::constraints::TimeTravellingRegions;
@@ -17,8 +17,8 @@ pub(super) struct LocationSensitiveAnalysis {
 }
 
 pub(super) struct LoanRegionNode {
-    associated_regions: ThinBitSet<RegionVid>,
-    added_regions: Option<ThinBitSet<RegionVid>>,
+    associated_regions: DenseBitSet<RegionVid>,
+    added_regions: Option<DenseBitSet<RegionVid>>,
     /// Whether this location is reachable by forward edges from the loan's introduction point in
     /// the localized constraint graph.
     reachable_by_loan: bool,
@@ -31,14 +31,14 @@ pub(super) struct LoanRegionNode {
 impl LocationSensitiveAnalysis {
     pub(super) fn new(bcx: BorrowContext<'_, '_, '_>) -> Self {
         // Put the loan's initial region in a set.
-        let mut initial_region_set = ThinBitSet::new_empty(bcx.pcx.regioncx.num_regions());
+        let mut initial_region_set = DenseBitSet::new_empty(bcx.pcx.regioncx.num_regions());
         initial_region_set.insert(bcx.borrow.region);
 
         let mut nodes = FxHashMap::default();
         nodes.insert(
             bcx.borrow.reserve_location,
             LoanRegionNode {
-                associated_regions: ThinBitSet::new_empty(bcx.pcx.regioncx.num_regions()),
+                associated_regions: DenseBitSet::new_empty(bcx.pcx.regioncx.num_regions()),
                 added_regions: Some(initial_region_set),
                 reachable_by_loan: false,
                 is_active: false,
@@ -60,7 +60,7 @@ impl LocationSensitiveAnalysis {
         bcx: BorrowContext<'_, '_, '_>,
         kills_cache: &mut KillsCache,
         target_location: Location,
-        live_paths: ThinBitSet<PoloniusBlock>,
+        live_paths: DenseBitSet<PoloniusBlock>,
     ) -> bool {
         my_println!("Checking {:?} at {:?}", bcx.borrow_idx, target_location);
         debug_assert!(!self.is_finished);
@@ -166,7 +166,7 @@ impl LocationSensitiveAnalysis {
                 |new_location, time_travellers, is_forward| {
                     let new_node =
                         self.nodes.entry(new_location).or_insert_with(|| LoanRegionNode {
-                            associated_regions: ThinBitSet::new_empty(
+                            associated_regions: DenseBitSet::new_empty(
                                 bcx.pcx.regioncx.num_regions(),
                             ),
                             added_regions: None,
@@ -238,7 +238,7 @@ fn visit_adjacent_locations(
     block_data: &BasicBlockData<'_>,
     location: Location,
     maybe_time_travellers: Option<TimeTravellingRegions>,
-    mut op: impl FnMut(Location, Option<&ThinBitSet<RegionVid>>, bool),
+    mut op: impl FnMut(Location, Option<&DenseBitSet<RegionVid>>, bool),
 ) {
     // Forwards:
     if location.statement_index < block_data.statements.len() {

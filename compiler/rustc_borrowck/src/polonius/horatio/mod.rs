@@ -12,7 +12,7 @@ use constraints::Constraints;
 use location_sensitive::LocationSensitiveAnalysis;
 use polonius_block::PoloniusBlock;
 use rustc_index::IndexVec;
-use rustc_index::bit_set::thin_bit_set::ThinBitSet;
+use rustc_index::bit_set::DenseBitSet;
 use rustc_middle::mir::{self, BasicBlock, Body, Local, Location, Place, Statement, Terminator};
 use rustc_middle::ty::TyCtxt;
 use rustc_mir_dataflow::points::DenseLocationMap;
@@ -77,7 +77,7 @@ pub(crate) struct PoloniusContext<'a, 'tcx> {
     /// c: {a}
     /// d: {a, b, c}
     /// ```
-    transitive_predecessors: IndexVec<BasicBlock, ThinBitSet<BasicBlock>>,
+    transitive_predecessors: IndexVec<BasicBlock, DenseBitSet<BasicBlock>>,
 
     /// For every block we store the immediate predecessors.
     ///
@@ -97,14 +97,14 @@ pub(crate) struct PoloniusContext<'a, 'tcx> {
     /// ```
     // FIXME: This is equivalent to `BasicBlocks.predecessors` but uses bit sets instead of
     // `SmallVec`. Maybe that should be replaced by this.
-    adjacent_predecessors: IndexVec<BasicBlock, ThinBitSet<BasicBlock>>,
+    adjacent_predecessors: IndexVec<BasicBlock, DenseBitSet<BasicBlock>>,
 
     /// Only computed for diagnostics: The regions that outlive free regions are used to distinguish
     /// relevant live locals from boring locals. A boring local is one whose type contains only such
     /// regions. Polonius currently has more boring locals than NLLs so we record the latter to use
     /// in errors and diagnostics, to focus on the locals we consider relevant and match NLL
     /// diagnostics.
-    boring_nll_locals: OnceCell<ThinBitSet<Local>>,
+    boring_nll_locals: OnceCell<DenseBitSet<Local>>,
 
     tcx: TyCtxt<'tcx>,
     regioncx: &'a RegionInferenceContext<'tcx>,
@@ -115,7 +115,7 @@ pub(crate) struct PoloniusContext<'a, 'tcx> {
 
 struct Cache<'a, 'tcx> {
     /// All universal regions.
-    universal_regions: ThinBitSet<RegionVid>,
+    universal_regions: DenseBitSet<RegionVid>,
 
     /// All outlives constraints.
     constraints: Constraints<'a, 'tcx>,
@@ -167,7 +167,7 @@ impl<'a, 'tcx> PoloniusContext<'a, 'tcx> {
     ) -> Self {
         // Compute `transitive_predecessors` and `adjacent_predecessors`.
         let mut transitive_predecessors = IndexVec::from_elem_n(
-            ThinBitSet::new_empty(body.basic_blocks.len()),
+            DenseBitSet::new_empty(body.basic_blocks.len()),
             body.basic_blocks.len(),
         );
         let mut adjacent_predecessors = transitive_predecessors.clone();
@@ -176,7 +176,7 @@ impl<'a, 'tcx> PoloniusContext<'a, 'tcx> {
         let mut stack =
             body.basic_blocks.reverse_postorder().iter().rev().copied().collect::<Vec<_>>();
         // We keep track of all blocks that are currently not in the stack.
-        let mut not_in_stack = ThinBitSet::new_empty(body.basic_blocks.len());
+        let mut not_in_stack = DenseBitSet::new_empty(body.basic_blocks.len());
         while let Some(block) = stack.pop() {
             not_in_stack.insert(block);
 
@@ -225,7 +225,7 @@ impl<'a, 'tcx> PoloniusContext<'a, 'tcx> {
 
     fn cache(&self) -> &Cache<'a, 'tcx> {
         self.cache.get_or_init(|| {
-            let mut universal_regions = ThinBitSet::new_empty(self.regioncx.num_regions());
+            let mut universal_regions = DenseBitSet::new_empty(self.regioncx.num_regions());
             universal_regions
                 .insert_range(self.regioncx.universal_regions().universal_regions_range());
 
@@ -239,15 +239,15 @@ impl<'a, 'tcx> PoloniusContext<'a, 'tcx> {
         })
     }
 
-    fn boring_nll_locals(&self) -> &ThinBitSet<Local> {
+    fn boring_nll_locals(&self) -> &DenseBitSet<Local> {
         self.boring_nll_locals.get_or_init(|| {
-            let mut free_regions = ThinBitSet::new_empty(self.regioncx.num_regions());
+            let mut free_regions = DenseBitSet::new_empty(self.regioncx.num_regions());
             for region in self.regioncx.universal_regions().universal_regions_iter() {
                 free_regions.insert(region);
             }
             self.cache().constraints.add_dependent_regions_reversed(&mut free_regions);
 
-            let mut boring_locals = ThinBitSet::new_empty(self.body.local_decls.len());
+            let mut boring_locals = DenseBitSet::new_empty(self.body.local_decls.len());
             for (local, local_decl) in self.body.local_decls.iter_enumerated() {
                 if self
                     .tcx
@@ -275,13 +275,13 @@ impl<'a, 'tcx> PoloniusContext<'a, 'tcx> {
 
 impl<'a, 'b, 'tcx> BorrowContext<'a, 'b, 'tcx> {
     /// Construct a new empty set with capacity for [`PoloniusBlock`]s.
-    fn new_polonius_block_set(self) -> ThinBitSet<PoloniusBlock> {
-        ThinBitSet::new_empty(PoloniusBlock::num_blocks(self))
+    fn new_polonius_block_set(self) -> DenseBitSet<PoloniusBlock> {
+        DenseBitSet::new_empty(PoloniusBlock::num_blocks(self))
     }
 
-    fn dependent_regions(&self) -> &ThinBitSet<RegionVid> {
+    fn dependent_regions(&self) -> &DenseBitSet<RegionVid> {
         self.borrow.dependent_regions.get_or_init(|| {
-            let mut dependent_regions = ThinBitSet::new_empty(self.pcx.regioncx.num_regions());
+            let mut dependent_regions = DenseBitSet::new_empty(self.pcx.regioncx.num_regions());
             dependent_regions.insert(self.borrow.region);
             self.pcx.cache().constraints.add_dependent_regions(&mut dependent_regions);
             dependent_regions
@@ -545,7 +545,7 @@ fn live_paths(
     bcx: BorrowContext<'_, '_, '_>,
     kills_cache: &mut KillsCache,
     destination: Location,
-) -> Option<ThinBitSet<PoloniusBlock>> {
+) -> Option<DenseBitSet<PoloniusBlock>> {
     // `destination_block` is the `PoloniusBlock` for `destination`.
     let destination_block = PoloniusBlock::from_location(bcx, destination);
 
@@ -574,7 +574,7 @@ fn live_paths(
     // a set of `PoloniusBlock`s making a path from `reserve_location` to `destination_block`.
     // In this way we can record the live paths.
     let introduction_block = PoloniusBlock::introduction_block(bcx);
-    let mut stack: SmallVec<[(PoloniusBlock, ThinBitSet<PoloniusBlock>); 4]> =
+    let mut stack: SmallVec<[(PoloniusBlock, DenseBitSet<PoloniusBlock>); 4]> =
         smallvec![(introduction_block, bcx.new_polonius_block_set())];
     visited.insert(introduction_block);
 
@@ -630,7 +630,7 @@ fn live_paths(
 fn remove_dead_regions(
     pcx: &PoloniusContext<'_, '_>,
     location: Location,
-    region_set: &mut ThinBitSet<RegionVid>,
+    region_set: &mut DenseBitSet<RegionVid>,
 ) {
     for region in region_set.clone().iter() {
         if !pcx.regioncx.liveness_constraints().is_live_at(region, location) {

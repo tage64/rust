@@ -2,7 +2,7 @@ use std::mem;
 use std::ops::ControlFlow;
 
 use rustc_index::IndexVec;
-use rustc_index::bit_set::thin_bit_set::{SparseBitMatrix, ThinBitSet};
+use rustc_index::bit_set::{DenseBitSet, SparseBitMatrix};
 use rustc_middle::mir::{
     BasicBlock, Body, Location, Statement, StatementKind, Terminator, TerminatorKind,
 };
@@ -114,9 +114,9 @@ enum TimeTravelKind {
 
 #[derive(Default)]
 pub(crate) struct TimeTravellingRegions {
-    pub to_prev_stmt: Option<ThinBitSet<RegionVid>>,
+    pub to_prev_stmt: Option<DenseBitSet<RegionVid>>,
     pub to_predecessor_blocks: Option<SparseBitMatrix<BasicBlock, RegionVid>>,
-    pub to_next_loc: Option<ThinBitSet<RegionVid>>,
+    pub to_next_loc: Option<DenseBitSet<RegionVid>>,
     pub to_successor_blocks: Option<SparseBitMatrix<BasicBlock, RegionVid>>,
 }
 
@@ -130,12 +130,12 @@ impl TimeTravellingRegions {
         match direction {
             TimeTravelDirection::Forwards => {
                 self.to_next_loc
-                    .get_or_insert_with(|| ThinBitSet::new_empty(regioncx.num_regions()))
+                    .get_or_insert_with(|| DenseBitSet::new_empty(regioncx.num_regions()))
                     .insert(region);
             }
             TimeTravelDirection::Backwards => {
                 self.to_prev_stmt
-                    .get_or_insert_with(|| ThinBitSet::new_empty(regioncx.num_regions()))
+                    .get_or_insert_with(|| DenseBitSet::new_empty(regioncx.num_regions()))
                     .insert(region);
             }
         }
@@ -311,7 +311,7 @@ impl<'a, 'tcx> Constraints<'a, 'tcx> {
     pub(crate) fn add_dependent_regions_at_point(
         &self,
         point: PointIndex,
-        regions: &mut ThinBitSet<RegionVid>,
+        regions: &mut DenseBitSet<RegionVid>,
     ) -> TimeTravellingRegions {
         // This function will loop until there are no more regions to add. It will keep a set of
         // regions that has not been considered yet (the `to_check` variable). At each iteration of
@@ -326,7 +326,7 @@ impl<'a, 'tcx> Constraints<'a, 'tcx> {
         // struct.
 
         let mut to_check = regions.clone();
-        let mut to_check_next_round = ThinBitSet::new_empty(self.regioncx.num_regions());
+        let mut to_check_next_round = DenseBitSet::new_empty(self.regioncx.num_regions());
         let mut time_travelling_regions = TimeTravellingRegions::default();
 
         // Loop till the fixpoint: when there are no more regions to add.
@@ -396,7 +396,7 @@ impl<'a, 'tcx> Constraints<'a, 'tcx> {
     /// - `'d: 'e`
     /// Then `'c`, `'d` and `'e` will be added to the set.
     #[inline(never)] // FIXME: Remove this.
-    pub(crate) fn add_dependent_regions(&self, regions: &mut ThinBitSet<RegionVid>) {
+    pub(crate) fn add_dependent_regions(&self, regions: &mut DenseBitSet<RegionVid>) {
         // This function will loop until there are no more regions to add. It will keep a set of
         // regions that has not been considered yet (the `to_check` variable). At each iteration of
         // the main loop, It'll walk through all constraints, both global and local. Any regions
@@ -408,7 +408,7 @@ impl<'a, 'tcx> Constraints<'a, 'tcx> {
         // The time travelling constraints will not be treated differently in this function.
 
         let mut to_check = regions.clone();
-        let mut to_check_next_round = ThinBitSet::new_empty(self.regioncx.num_regions());
+        let mut to_check_next_round = DenseBitSet::new_empty(self.regioncx.num_regions());
 
         // Loop till the fixpoint: when there are no more regions to add.
         while !to_check.is_empty() {
@@ -440,12 +440,12 @@ impl<'a, 'tcx> Constraints<'a, 'tcx> {
     /// Like `add_dependent_regions()` but with constraints reversed.
     // FIXME: Could these functions be merged to avoid code duplication.
     #[inline(never)] // FIXME: Remove this.
-    pub(crate) fn add_dependent_regions_reversed(&self, regions: &mut ThinBitSet<RegionVid>) {
+    pub(crate) fn add_dependent_regions_reversed(&self, regions: &mut DenseBitSet<RegionVid>) {
         // See the `add_dependent_regions()` function for an explonation of the code. The functions
         // are identical except that we swapped sub and sup.
 
         let mut to_check = regions.clone();
-        let mut to_check_next_round = ThinBitSet::new_empty(self.regioncx.num_regions());
+        let mut to_check_next_round = DenseBitSet::new_empty(self.regioncx.num_regions());
 
         // Loop till the fixpoint: when there are no more regions to add.
         while !to_check.is_empty() {

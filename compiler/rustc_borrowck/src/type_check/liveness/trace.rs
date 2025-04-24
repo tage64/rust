@@ -1,6 +1,5 @@
 use rustc_data_structures::fx::FxIndexMap;
 use rustc_index::bit_set::DenseBitSet;
-use rustc_index::bit_set::thin_bit_set::ThinBitSet;
 use rustc_index::interval::IntervalSet;
 use rustc_infer::infer::canonical::QueryRegionConstraints;
 use rustc_infer::infer::outlives::for_liveness;
@@ -44,7 +43,7 @@ pub(super) fn trace<'a, 'tcx>(
     location_map: &DenseLocationMap,
     flow_inits: ResultsCursor<'a, 'tcx, MaybeInitializedPlaces<'a, 'tcx>>,
     move_data: &MoveData<'tcx>,
-    relevant_live_locals: ThinBitSet<Local>,
+    relevant_live_locals: DenseBitSet<Local>,
 ) {
     let local_use_map = &LocalUseMap::build(&relevant_live_locals, location_map, body);
     let cx = LivenessContext {
@@ -185,7 +184,7 @@ impl<'a, 'typeck, 'b, 'tcx> LivenessResults<'a, 'typeck, 'b, 'tcx> {
     ///
     /// Add facts for all locals with free regions, since regions may outlive
     /// the function body only at certain nodes in the CFG.
-    fn add_extra_drop_facts(&mut self, relevant_live_locals: &ThinBitSet<Local>) {
+    fn add_extra_drop_facts(&mut self, relevant_live_locals: &DenseBitSet<Local>) {
         // This collect is more necessary than immediately apparent
         // because these facts go into `add_drop_live_facts_for()`,
         // which also writes to `polonius_facts`, and so this is genuinely

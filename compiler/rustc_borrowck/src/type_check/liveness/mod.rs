@@ -1,5 +1,5 @@
 use rustc_data_structures::fx::FxHashSet;
-use rustc_index::bit_set::thin_bit_set::ThinBitSet;
+use rustc_index::bit_set::DenseBitSet;
 use rustc_middle::mir::visit::{TyContext, Visitor};
 use rustc_middle::mir::{Body, Local, Location, SourceInfo};
 use rustc_middle::span_bug;
@@ -66,8 +66,8 @@ fn compute_relevant_live_locals<'tcx>(
     tcx: TyCtxt<'tcx>,
     body: &Body<'tcx>,
     mut is_free_region: impl FnMut(RegionVid) -> bool,
-) -> ThinBitSet<Local> {
-    let mut relevant_live_locals = ThinBitSet::new_empty(body.local_decls.len());
+) -> DenseBitSet<Local> {
+    let mut relevant_live_locals = DenseBitSet::new_empty(body.local_decls.len());
     for (local, local_decl) in body.local_decls.iter_enumerated() {
         if !tcx.all_free_regions_meet(&local_decl.ty, |r| is_free_region(r.as_var())) {
             relevant_live_locals.insert(local);
