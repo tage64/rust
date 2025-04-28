@@ -11,10 +11,11 @@ use std::rc::Rc;
 use std::{fmt, iter};
 
 use Chunk::*;
+pub use old_dense_bit_set::{DenseBitSet, GrowableBitSet};
 #[cfg(feature = "nightly")]
 use rustc_macros::{Decodable_Generic, Encodable_Generic};
 use smallvec::{SmallVec, smallvec};
-pub use thin_bit_set::{BitIter, GrowableBitSet, ThinBitSet as DenseBitSet};
+pub use thin_bit_set::BitIter;
 
 use crate::{Idx, IndexVec};
 
