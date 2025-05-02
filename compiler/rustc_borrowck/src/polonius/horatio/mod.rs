@@ -326,6 +326,17 @@ impl<'a, 'tcx> Polonius<'a, 'tcx> {
             return false;
         }
 
+        true
+    }
+
+    /// Check if a loan is in scope at a location.
+    #[inline(never)] // Remove this.
+    pub(crate) fn loan_in_scope_at(
+        &mut self,
+        borrow_idx: BorrowIndex,
+        borrow: &BorrowData<'tcx>,
+        location: Location,
+    ) -> bool {
         let maybe_borrow_data = self.borrows.ensure_contains_elem(borrow_idx, || None);
         match maybe_borrow_data {
             Some(PoloniusBorrowData::Ignored) => return false,
@@ -358,17 +369,6 @@ impl<'a, 'tcx> Polonius<'a, 'tcx> {
             Some(PoloniusBorrowData::Data { scope_computation: None, .. }) => (),
         };
 
-        true
-    }
-
-    /// Check if a loan is in scope at a location.
-    #[inline(never)] // Remove this.
-    pub(crate) fn loan_in_scope_at(
-        &mut self,
-        borrow_idx: BorrowIndex,
-        borrow: &BorrowData<'tcx>,
-        location: Location,
-    ) -> bool {
         let maybe_borrow_data = &mut self.borrows[borrow_idx];
         match maybe_borrow_data {
             Some(PoloniusBorrowData::Ignored) => unreachable!(),
