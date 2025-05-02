@@ -276,8 +276,8 @@ impl<'a, 'tcx> TOFinder<'a, 'tcx> {
 
         let last_non_rec = self.opportunities.len();
 
-        let predecessors = &self.body.basic_blocks.predecessors()[bb];
-        if let &[pred] = &predecessors[..]
+        let predecessors = &self.body.basic_blocks.predecessors().adjacent_predecessors[bb];
+        if let Some(pred) = predecessors.only_one_elem()
             && bb != START_BLOCK
         {
             let term = self.body.basic_blocks[pred].terminator();
@@ -288,11 +288,15 @@ impl<'a, 'tcx> TOFinder<'a, 'tcx> {
                 }
                 _ => self.recurse_through_terminator(pred, || state, &cost, depth),
             }
-        } else if let &[ref predecessors @ .., last_pred] = &predecessors[..] {
-            for &pred in predecessors {
+        } else {
+            let mut preds_iter = predecessors.iter().peekable();
+            while let Some(pred) = preds_iter.next() {
+                if preds_iter.peek().is_none() {
+                    self.recurse_through_terminator(pred, || state, &cost, depth);
+                    break;
+                }
                 self.recurse_through_terminator(pred, || state.clone(), &cost, depth);
             }
-            self.recurse_through_terminator(last_pred, || state, &cost, depth);
         }
 
         let new_tos = &mut self.opportunities[last_non_rec..];
@@ -300,11 +304,11 @@ impl<'a, 'tcx> TOFinder<'a, 'tcx> {
 
         // Try to deduplicate threading opportunities.
         if new_tos.len() > 1
-            && new_tos.len() == predecessors.len()
+            && new_tos.len() == predecessors.count()
             && predecessors
                 .iter()
                 .zip(new_tos.iter())
-                .all(|(&pred, to)| to.chain == &[pred] && to.target == new_tos[0].target)
+                .all(|(pred, to)| to.chain == &[pred] && to.target == new_tos[0].target)
         {
             // All predecessors have a threading opportunity, and they all point to the same block.
             debug!(?new_tos, "dedup");
@@ -644,7 +648,10 @@ impl<'a, 'tcx> TOFinder<'a, 'tcx> {
         state: &mut State<ConditionSet<'a>>,
     ) {
         debug_assert_ne!(target_bb, START_BLOCK);
-        debug_assert_eq!(self.body.basic_blocks.predecessors()[target_bb].len(), 1);
+        debug_assert_eq!(
+            self.body.basic_blocks.predecessors().adjacent_predecessors[target_bb].count(),
+            1
+        );
 
         let Some(discr) = discr.place() else { return };
         let discr_ty = discr.ty(self.body, self.tcx).ty;
@@ -821,8 +828,13 @@ impl OpportunitySet {
 }
 
 fn predecessor_count(body: &Body<'_>) -> IndexVec<BasicBlock, usize> {
-    let mut predecessors: IndexVec<_, _> =
-        body.basic_blocks.predecessors().iter().map(|ps| ps.len()).collect();
+    let mut predecessors: IndexVec<_, _> = body
+        .basic_blocks
+        .predecessors()
+        .adjacent_predecessors
+        .iter()
+        .map(|ps| ps.count())
+        .collect();
     predecessors[START_BLOCK] += 1; // Account for the implicit entry edge.
     predecessors
 }

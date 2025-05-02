@@ -148,7 +148,7 @@ impl LocationSensitiveAnalysis {
             // Check if the loan is killed.
             let is_killed = is_killed(bcx, kills_cache, location);
 
-            if is_killed && bcx.pcx.is_predecessor(bcx.borrow.reserve_location, location) {
+            if is_killed && bcx.borrow.reserve_location.is_predecessor_of(location, bcx.pcx.body) {
                 continue;
             }
 
@@ -261,8 +261,8 @@ fn visit_adjacent_locations(
         let time_travellers = maybe_time_travellers.as_ref().and_then(|t| t.to_prev_stmt.as_ref());
         op(predecessor_location, time_travellers, false);
     } else {
-        for &predecessor_block in
-            &pcx.body.basic_blocks.predecessors().adjacent_predecessors[location.block].iter()
+        for predecessor_block in
+            pcx.body.basic_blocks.predecessors().adjacent_predecessors[location.block].iter()
         {
             let predecessor_location = Location {
                 block: predecessor_block,

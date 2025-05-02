@@ -160,7 +160,9 @@ impl CoverageGraph {
                 // previous block permits chaining, and the current block has
                 // `prev` as its sole predecessor.
                 let can_chain = subgraph.coverage_successors(prev).is_out_chainable()
-                    && mir_body.basic_blocks.predecessors()[bb].as_slice() == &[prev];
+                    && mir_body.basic_blocks.predecessors().adjacent_predecessors[bb]
+                        .only_one_elem()
+                        == Some(prev);
                 if !can_chain {
                     // The current block can't be added to the existing chain, so
                     // flush that chain into a new BCB, and start a new chain.
