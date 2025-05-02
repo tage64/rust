@@ -3533,8 +3533,9 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
             location: Location,
         ) -> impl Iterator<Item = Location> {
             if location.statement_index == 0 {
-                let predecessors = body.basic_blocks.predecessors()[location.block].to_vec();
-                Either::Left(predecessors.into_iter().map(move |bb| body.terminator_loc(bb)))
+                let predecessors =
+                    body.basic_blocks.predecessors().adjacent_predecessors[location.block];
+                Either::Left(predecessors.iter().map(move |bb| body.terminator_loc(bb)))
             } else {
                 Either::Right(std::iter::once(Location {
                     statement_index: location.statement_index - 1,

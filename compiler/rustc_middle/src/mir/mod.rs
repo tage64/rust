@@ -1635,6 +1635,7 @@ impl Location {
     }
 
     /// Returns `true` if `self` is earlier in the control flow graph than `other`.
+    #[inline]
     pub fn is_predecessor_of<'tcx>(&self, other: Location, body: &Body<'tcx>) -> bool {
         self.block == other.block && self.statement_index < other.statement_index
             || body.basic_blocks.predecessors().transitive_predecessors[other.block]

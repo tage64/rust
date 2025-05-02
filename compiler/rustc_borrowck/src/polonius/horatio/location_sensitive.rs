@@ -261,7 +261,9 @@ fn visit_adjacent_locations(
         let time_travellers = maybe_time_travellers.as_ref().and_then(|t| t.to_prev_stmt.as_ref());
         op(predecessor_location, time_travellers, false);
     } else {
-        for &predecessor_block in &pcx.body.basic_blocks.predecessors()[location.block] {
+        for &predecessor_block in
+            &pcx.body.basic_blocks.predecessors().adjacent_predecessors[location.block].iter()
+        {
             let predecessor_location = Location {
                 block: predecessor_block,
                 statement_index: pcx.body[predecessor_block].statements.len(),

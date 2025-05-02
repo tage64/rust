@@ -13,7 +13,7 @@ use location_sensitive::LocationSensitiveAnalysis;
 use polonius_block::PoloniusBlock;
 use rustc_index::IndexVec;
 use rustc_index::bit_set::DenseBitSet;
-use rustc_middle::mir::{self, BasicBlock, Body, Local, Location, Place, Statement, Terminator};
+use rustc_middle::mir::{self, Body, Local, Location, Place, Statement, Terminator};
 use rustc_middle::ty::TyCtxt;
 use rustc_mir_dataflow::points::DenseLocationMap;
 use smallvec::{SmallVec, smallvec};
@@ -60,44 +60,6 @@ pub(crate) struct Polonius<'a, 'tcx> {
 pub(crate) struct PoloniusContext<'a, 'tcx> {
     /// A cache that is only computed if we need the location sensitive analysis.
     cache: OnceCell<Cache<'a, 'tcx>>,
-
-    /// For every block, we store a set of all proceeding blocks.
-    ///
-    /// ```
-    ///       a
-    ///      / \
-    ///     b   c
-    ///      \ /
-    ///       d
-    /// ```
-    /// In this case we have:
-    /// ```
-    /// a: {}
-    /// b: {a}
-    /// c: {a}
-    /// d: {a, b, c}
-    /// ```
-    transitive_predecessors: IndexVec<BasicBlock, DenseBitSet<BasicBlock>>,
-
-    /// For every block we store the immediate predecessors.
-    ///
-    /// ```text
-    ///       a
-    ///      / \
-    ///     b   c
-    ///      \ /
-    ///       d
-    /// ```
-    /// In this case we have:
-    /// ```
-    /// a: {}
-    /// b: {a}
-    /// c: {a}
-    /// d: {b, c}
-    /// ```
-    // FIXME: This is equivalent to `BasicBlocks.predecessors` but uses bit sets instead of
-    // `SmallVec`. Maybe that should be replaced by this.
-    adjacent_predecessors: IndexVec<BasicBlock, DenseBitSet<BasicBlock>>,
 
     /// Only computed for diagnostics: The regions that outlive free regions are used to distinguish
     /// relevant live locals from boring locals. A boring local is one whose type contains only such
@@ -165,55 +127,8 @@ impl<'a, 'tcx> PoloniusContext<'a, 'tcx> {
         location_map: &'a DenseLocationMap,
         borrow_set: &'a BorrowSet<'tcx>,
     ) -> Self {
-        // Compute `transitive_predecessors` and `adjacent_predecessors`.
-        let mut transitive_predecessors = IndexVec::from_elem_n(
-            DenseBitSet::new_empty(body.basic_blocks.len()),
-            body.basic_blocks.len(),
-        );
-        let mut adjacent_predecessors = transitive_predecessors.clone();
-        // The stack is initially a reversed postorder traversal of the CFG. However, we might add
-        // add blocks again to the stack if we have loops.
-        let mut stack =
-            body.basic_blocks.reverse_postorder().iter().rev().copied().collect::<Vec<_>>();
-        // We keep track of all blocks that are currently not in the stack.
-        let mut not_in_stack = DenseBitSet::new_empty(body.basic_blocks.len());
-        while let Some(block) = stack.pop() {
-            not_in_stack.insert(block);
-
-            // Loop over all successors to the block and add `block` to their predecessors.
-            for succ_block in body.basic_blocks[block].terminator().successors() {
-                // Keep track of whether the transitive predecessors of `succ_block` has changed.
-                let mut changed = false;
-
-                // Insert `block` in `succ_block`s predecessors.
-                if adjacent_predecessors[succ_block].insert(block) {
-                    // Remember that `adjacent_predecessors` is a subset of
-                    // `transitive_predecessors`.
-                    changed |= transitive_predecessors[succ_block].insert(block);
-                }
-
-                // Add all transitive predecessors of `block` to the transitive predecessors of
-                // `succ_block`.
-                if block != succ_block {
-                    let (blocks_predecessors, succ_blocks_predecessors) =
-                        transitive_predecessors.pick2_mut(block, succ_block);
-                    changed |= succ_blocks_predecessors.union(blocks_predecessors);
-
-                    // Check if the `succ_block`s transitive predecessors changed. If so, we may
-                    // need to add it to the stack again.
-                    if changed && not_in_stack.remove(succ_block) {
-                        stack.push(succ_block);
-                    }
-                }
-            }
-
-            debug_assert!(transitive_predecessors[block].superset(&adjacent_predecessors[block]));
-        }
-
         Self {
             cache: OnceCell::new(),
-            transitive_predecessors,
-            adjacent_predecessors,
             boring_nll_locals: OnceCell::new(),
             tcx,
             regioncx,
@@ -263,13 +178,6 @@ impl<'a, 'tcx> PoloniusContext<'a, 'tcx> {
 
     pub(crate) fn is_boring_local(&self, local: Local) -> bool {
         self.boring_nll_locals().contains(local)
-    }
-
-    /// Returns `true` iff `a` is earlier in the control flow graph than `b`.
-    #[inline]
-    fn is_predecessor(&self, a: Location, b: Location) -> bool {
-        a.block == b.block && a.statement_index < b.statement_index
-            || self.transitive_predecessors[b.block].contains(a.block)
     }
 }
 
@@ -324,7 +232,7 @@ impl<'a, 'tcx> Polonius<'a, 'tcx> {
         location: Location,
     ) -> bool {
         // Check if this location can never be reached by the borrow.
-        if !self.pcx.is_predecessor(borrow.reserve_location(), location) {
+        if !borrow.reserve_location().is_predecessor_of(location, self.pcx.body) {
             return false;
         }
 
