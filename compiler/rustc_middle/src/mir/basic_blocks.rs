@@ -96,7 +96,7 @@ impl<'tcx> BasicBlocks<'tcx> {
     }
 
     /// Returns predecessors for each basic block.
-    #[inline]
+    #[inline(always)]
     pub fn predecessors(&self) -> &Predecessors {
         self.cache.predecessors.get_or_init(|| {
             // Compute `transitive_predecessors` and `adjacent_predecessors`.
