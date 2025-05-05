@@ -21,24 +21,6 @@ pub struct BasicBlocks<'tcx> {
 
 #[derive(Clone, Default, Debug)]
 pub struct Predecessors {
-    /// For every block, we store a set of all proceeding blocks.
-    ///
-    /// ```
-    ///       a
-    ///      / \
-    ///     b   c
-    ///      \ /
-    ///       d
-    /// ```
-    /// In this case we have:
-    /// ```
-    /// a: {}
-    /// b: {a}
-    /// c: {a}
-    /// d: {a, b, c}
-    /// ```
-    pub transitive_predecessors: IndexVec<BasicBlock, DenseBitSet<BasicBlock>>,
-
     /// For every block we store the immediate predecessors.
     ///
     /// ```text
@@ -58,6 +40,24 @@ pub struct Predecessors {
     // FIXME: This is equivalent to `BasicBlocks.predecessors` but uses bit sets instead of
     // `SmallVec`. Maybe that should be replaced by this.
     pub adjacent_predecessors: IndexVec<BasicBlock, DenseBitSet<BasicBlock>>,
+
+    /// For every block, we store a set of all proceeding blocks.
+    ///
+    /// ```
+    ///       a
+    ///      / \
+    ///     b   c
+    ///      \ /
+    ///       d
+    /// ```
+    /// In this case we have:
+    /// ```
+    /// a: {}
+    /// b: {a}
+    /// c: {a}
+    /// d: {a, b, c}
+    /// ```
+    pub transitive_predecessors: IndexVec<BasicBlock, DenseBitSet<BasicBlock>>,
 }
 
 /// Each `(target, switch)` entry in the map contains a list of switch values
@@ -96,7 +96,7 @@ impl<'tcx> BasicBlocks<'tcx> {
     }
 
     /// Returns predecessors for each basic block.
-    #[inline(always)]
+    #[inline]
     pub fn predecessors(&self) -> &Predecessors {
         self.cache.predecessors.get_or_init(|| {
             // Compute `transitive_predecessors` and `adjacent_predecessors`.
