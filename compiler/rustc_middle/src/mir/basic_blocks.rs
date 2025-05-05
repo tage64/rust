@@ -19,46 +19,8 @@ pub struct BasicBlocks<'tcx> {
     cache: Cache,
 }
 
-#[derive(Clone, Default, Debug)]
-pub struct Predecessors {
-    /// For every block we store the immediate predecessors.
-    ///
-    /// ```text
-    ///       a
-    ///      / \
-    ///     b   c
-    ///      \ /
-    ///       d
-    /// ```
-    /// In this case we have:
-    /// ```
-    /// a: {}
-    /// b: {a}
-    /// c: {a}
-    /// d: {b, c}
-    /// ```
-    // FIXME: This is equivalent to `BasicBlocks.predecessors` but uses bit sets instead of
-    // `SmallVec`. Maybe that should be replaced by this.
-    pub adjacent_predecessors: IndexVec<BasicBlock, DenseBitSet<BasicBlock>>,
-
-    /// For every block, we store a set of all proceeding blocks.
-    ///
-    /// ```
-    ///       a
-    ///      / \
-    ///     b   c
-    ///      \ /
-    ///       d
-    /// ```
-    /// In this case we have:
-    /// ```
-    /// a: {}
-    /// b: {a}
-    /// c: {a}
-    /// d: {a, b, c}
-    /// ```
-    pub transitive_predecessors: IndexVec<BasicBlock, DenseBitSet<BasicBlock>>,
-}
+// Typically 95%+ of basic blocks have 4 or fewer predecessors.
+type Predecessors = IndexVec<BasicBlock, DenseBitSet<BasicBlock>>;
 
 /// Each `(target, switch)` entry in the map contains a list of switch values
 /// that lead to a `target` block from a `switch` block.
@@ -79,7 +41,44 @@ pub enum SwitchTargetValue {
 
 #[derive(Clone, Default, Debug)]
 struct Cache {
-    predecessors: OnceLock<Predecessors>,
+    /// For every block we store the immediate predecessors.
+    ///
+    /// ```text
+    ///       a
+    ///      / \
+    ///     b   c
+    ///      \ /
+    ///       d
+    /// ```
+    /// In this case we have:
+    /// ```
+    /// a: {}
+    /// b: {a}
+    /// c: {a}
+    /// d: {b, c}
+    /// ```
+    // FIXME: This is equivalent to `BasicBlocks.predecessors` but uses bit sets instead of
+    // `SmallVec`. Maybe that should be replaced by this.
+    adjacent_predecessors: OnceLock<Predecessors>,
+
+    /// For every block, we store a set of all proceeding blocks.
+    ///
+    /// ```
+    ///       a
+    ///      / \
+    ///     b   c
+    ///      \ /
+    ///       d
+    /// ```
+    /// In this case we have:
+    /// ```
+    /// a: {}
+    /// b: {a}
+    /// c: {a}
+    /// d: {a, b, c}
+    /// ```
+    transitive_predecessors: OnceLock<Predecessors>,
+
     switch_sources: OnceLock<SwitchSources>,
     reverse_postorder: OnceLock<Vec<BasicBlock>>,
     dominators: OnceLock<Dominators<BasicBlock>>,
@@ -98,11 +97,40 @@ impl<'tcx> BasicBlocks<'tcx> {
     /// Returns predecessors for each basic block.
     #[inline]
     pub fn predecessors(&self) -> &Predecessors {
-        self.cache.predecessors.get_or_init(|| {
-            // Compute `transitive_predecessors` and `adjacent_predecessors`.
+        self.cache.adjacent_predecessors.get_or_init(|| {
+            let mut preds = IndexVec::from_elem_n(DenseBitSet::new_empty(self.len()), self.len());
+            for (bb, data) in self.basic_blocks.iter_enumerated() {
+                if let Some(term) = &data.terminator {
+                    for succ in term.successors() {
+                        preds[succ].insert(bb);
+                    }
+                }
+            }
+            preds
+        })
+    }
+
+    /// For every block, we store a set of all proceeding blocks.
+    ///
+    /// ```
+    ///       a
+    ///      / \
+    ///     b   c
+    ///      \ /
+    ///       d
+    /// ```
+    /// In this case we have:
+    /// ```
+    /// a: {}
+    /// b: {a}
+    /// c: {a}
+    /// d: {a, b, c}
+    /// ```
+    pub fn transitive_predecessors(&self) -> &Predecessors {
+        self.cache.transitive_predecessors.get_or_init(|| {
+            // Compute `transitive_predecessors`
             let mut transitive_predecessors =
                 IndexVec::from_elem_n(DenseBitSet::new_empty(self.len()), self.len());
-            let mut adjacent_predecessors = transitive_predecessors.clone();
             // The stack is initially a reversed postorder traversal of the CFG. However, we might add
             // add blocks again to the stack if we have loops.
             let mut stack = self.reverse_postorder().iter().rev().copied().collect::<Vec<_>>();
@@ -116,12 +144,7 @@ impl<'tcx> BasicBlocks<'tcx> {
                     // Keep track of whether the transitive predecessors of `succ_block` has changed.
                     let mut changed = false;
 
-                    // Insert `block` in `succ_block`s predecessors.
-                    if adjacent_predecessors[succ_block].insert(block) {
-                        // Remember that `adjacent_predecessors` is a subset of
-                        // `transitive_predecessors`.
-                        changed |= transitive_predecessors[succ_block].insert(block);
-                    }
+                    changed |= transitive_predecessors[succ_block].insert(block);
 
                     // Add all transitive predecessors of `block` to the transitive predecessors of
                     // `succ_block`.
@@ -137,13 +160,9 @@ impl<'tcx> BasicBlocks<'tcx> {
                         }
                     }
                 }
-
-                debug_assert!(
-                    transitive_predecessors[block].superset(&adjacent_predecessors[block])
-                );
             }
 
-            Predecessors { transitive_predecessors, adjacent_predecessors }
+            transitive_predecessors
         })
     }
 
@@ -256,7 +275,7 @@ impl<'tcx> graph::Successors for BasicBlocks<'tcx> {
 impl<'tcx> graph::Predecessors for BasicBlocks<'tcx> {
     #[inline]
     fn predecessors(&self, node: Self::Node) -> impl Iterator<Item = Self::Node> {
-        self.predecessors().adjacent_predecessors[node].iter()
+        self.predecessors()[node].iter()
     }
 }
 

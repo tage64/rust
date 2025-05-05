@@ -503,7 +503,7 @@ fn live_paths(
             // Given two `PoloniusBlock`s a and b, then a is a predecessor of b iff
             // `a.basic_block()` is a predecessor of `b.basic_block()`, or a is the "before
             // introduction block" and b is the "introduction block".
-            if !bcx.pcx.body.basic_blocks.predecessors().transitive_predecessors[destination.block]
+            if !bcx.pcx.body.basic_blocks.transitive_predecessors()[destination.block]
                 .contains(successor_bb)
                 || destination_block.is_introduction_block(bcx)
                     && successor.is_before_introduction_block(bcx)

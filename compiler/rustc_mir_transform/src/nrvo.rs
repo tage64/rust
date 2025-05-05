@@ -131,7 +131,7 @@ fn find_local_assigned_to_return_place(start: BasicBlock, body: &mir::Body<'_>) 
             return local;
         }
 
-        let predecessors = &body.basic_blocks.predecessors().adjacent_predecessors[block];
+        let predecessors = &body.basic_blocks.predecessors()[block];
         block = predecessors.only_one_elem()?; // Return if there is not exactly one predecessor.
     }
 

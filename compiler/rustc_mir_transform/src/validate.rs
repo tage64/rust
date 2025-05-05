@@ -276,7 +276,7 @@ impl<'a, 'tcx> CfgChecker<'a, 'tcx> {
     fn is_critical_call_edge(&self, target: Option<BasicBlock>, unwind: UnwindAction) -> bool {
         let Some(target) = target else { return false };
         matches!(unwind, UnwindAction::Cleanup(_) | UnwindAction::Terminate(_))
-            && self.body.basic_blocks.predecessors().adjacent_predecessors[target].count() > 1
+            && self.body.basic_blocks.predecessors()[target].count() > 1
     }
 }
 

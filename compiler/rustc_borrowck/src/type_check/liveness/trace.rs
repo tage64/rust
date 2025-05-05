@@ -276,7 +276,7 @@ impl<'a, 'typeck, 'b, 'tcx> LivenessResults<'a, 'typeck, 'b, 'tcx> {
 
                 let block = self.cx.location_map.to_location(block_start).block;
                 self.stack.extend(
-                    self.cx.body.basic_blocks.predecessors().adjacent_predecessors[block]
+                    self.cx.body.basic_blocks.predecessors()[block]
                         .iter()
                         .map(|pred_bb| self.cx.body.terminator_loc(pred_bb))
                         .map(|pred_loc| self.cx.location_map.point_from_location(pred_loc)),
@@ -375,7 +375,7 @@ impl<'a, 'typeck, 'b, 'tcx> LivenessResults<'a, 'typeck, 'b, 'tcx> {
         }
 
         let body = self.cx.body;
-        for pred_block in body.basic_blocks.predecessors().adjacent_predecessors[block].iter() {
+        for pred_block in body.basic_blocks.predecessors()[block].iter() {
             debug!("compute_drop_live_points_for_block: pred_block = {:?}", pred_block,);
 
             // Check whether the variable is (at least partially)

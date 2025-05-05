@@ -1638,8 +1638,7 @@ impl Location {
     #[inline]
     pub fn is_predecessor_of<'tcx>(&self, other: Location, body: &Body<'tcx>) -> bool {
         self.block == other.block && self.statement_index < other.statement_index
-            || body.basic_blocks.predecessors().transitive_predecessors[other.block]
-                .contains(self.block)
+            || body.basic_blocks.transitive_predecessors()[other.block].contains(self.block)
     }
 
     #[inline]

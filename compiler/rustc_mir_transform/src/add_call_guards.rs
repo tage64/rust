@@ -32,13 +32,8 @@ pub(super) use self::AddCallGuards::*;
 
 impl<'tcx> crate::MirPass<'tcx> for AddCallGuards {
     fn run_pass(&self, _tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
-        let mut pred_count: IndexVec<_, _> = body
-            .basic_blocks
-            .predecessors()
-            .adjacent_predecessors
-            .iter()
-            .map(|ps| ps.count())
-            .collect();
+        let mut pred_count: IndexVec<_, _> =
+            body.basic_blocks.predecessors().iter().map(|ps| ps.count()).collect();
         pred_count[START_BLOCK] += 1;
 
         // We need a place to store the new blocks generated

@@ -276,7 +276,7 @@ impl<'a, 'tcx> TOFinder<'a, 'tcx> {
 
         let last_non_rec = self.opportunities.len();
 
-        let predecessors = &self.body.basic_blocks.predecessors().adjacent_predecessors[bb];
+        let predecessors = &self.body.basic_blocks.predecessors()[bb];
         if let Some(pred) = predecessors.only_one_elem()
             && bb != START_BLOCK
         {
@@ -648,10 +648,7 @@ impl<'a, 'tcx> TOFinder<'a, 'tcx> {
         state: &mut State<ConditionSet<'a>>,
     ) {
         debug_assert_ne!(target_bb, START_BLOCK);
-        debug_assert_eq!(
-            self.body.basic_blocks.predecessors().adjacent_predecessors[target_bb].count(),
-            1
-        );
+        debug_assert_eq!(self.body.basic_blocks.predecessors()[target_bb].count(), 1);
 
         let Some(discr) = discr.place() else { return };
         let discr_ty = discr.ty(self.body, self.tcx).ty;
@@ -828,13 +825,8 @@ impl OpportunitySet {
 }
 
 fn predecessor_count(body: &Body<'_>) -> IndexVec<BasicBlock, usize> {
-    let mut predecessors: IndexVec<_, _> = body
-        .basic_blocks
-        .predecessors()
-        .adjacent_predecessors
-        .iter()
-        .map(|ps| ps.count())
-        .collect();
+    let mut predecessors: IndexVec<_, _> =
+        body.basic_blocks.predecessors().iter().map(|ps| ps.count()).collect();
     predecessors[START_BLOCK] += 1; // Account for the implicit entry edge.
     predecessors
 }

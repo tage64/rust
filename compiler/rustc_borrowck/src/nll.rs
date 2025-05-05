@@ -95,22 +95,19 @@ pub(crate) fn compute_regions<'a, 'tcx>(
     let location_map = Rc::new(DenseLocationMap::new(body));
 
     // Run the MIR type-checker.
-    let MirTypeckResults {
-        constraints,
-        universal_region_relations,
-        opaque_type_values,
-    } = type_check::type_check(
-        infcx,
-        body,
-        promoted,
-        universal_regions,
-        location_table,
-        borrow_set,
-        &mut polonius_facts,
-        flow_inits,
-        move_data,
-        Rc::clone(&location_map),
-    );
+    let MirTypeckResults { constraints, universal_region_relations, opaque_type_values } =
+        type_check::type_check(
+            infcx,
+            body,
+            promoted,
+            universal_regions,
+            location_table,
+            borrow_set,
+            &mut polonius_facts,
+            flow_inits,
+            move_data,
+            Rc::clone(&location_map),
+        );
 
     // Create the region inference context, taking ownership of the
     // region inference data that was contained in `infcx`, and the

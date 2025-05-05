@@ -1345,8 +1345,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             if let Some(succ) = successors.next()
                 && successors.next().is_none()
             {
-                let mut predecessors =
-                    self.mir.basic_blocks.predecessors().adjacent_predecessors[succ].iter();
+                let mut predecessors = self.mir.basic_blocks.predecessors()[succ].iter();
                 if let Some(succ_pred) = predecessors.next()
                     && predecessors.next().is_none()
                 {
