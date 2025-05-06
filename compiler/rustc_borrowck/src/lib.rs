@@ -1068,6 +1068,10 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, '_, 'tcx> {
         for &borrow_idx in borrows_for_place_base {
             let borrow = &self.borrow_set[borrow_idx];
 
+            if !self.borrow_maybe_active_at(borrow_idx, borrow, location) {
+                continue;
+            }
+
             match (rw, borrow.kind) {
                 // Obviously an activation is compatible with its own
                 // reservation (or even prior activating uses of same
@@ -1102,10 +1106,6 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, '_, 'tcx> {
                 }
 
                 (Read(kind), BorrowKind::Mut { .. }) => {
-                    if !self.borrow_maybe_active_at(borrow_idx, borrow, location) {
-                        continue;
-                    }
-
                     if !places_conflict::borrow_conflicts_with_place(
                         self.infcx.infcx.tcx,
                         self.body,
@@ -1144,10 +1144,6 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, '_, 'tcx> {
                 }
 
                 (Reservation(kind) | Activation(kind, _) | Write(kind), _) => {
-                    if !self.borrow_maybe_active_at(borrow_idx, borrow, location) {
-                        continue;
-                    }
-
                     if !places_conflict::borrow_conflicts_with_place(
                         self.infcx.infcx.tcx,
                         self.body,
