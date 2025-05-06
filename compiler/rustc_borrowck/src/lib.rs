@@ -1068,10 +1068,6 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, '_, 'tcx> {
         for &borrow_idx in borrows_for_place_base {
             let borrow = &self.borrow_set[borrow_idx];
 
-            if borrow.borrowed_place.local != place.local {
-                continue;
-            }
-
             if !self.borrow_maybe_active_at(borrow_idx, borrow, location) {
                 continue;
             }
