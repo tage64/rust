@@ -1068,19 +1068,11 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, '_, 'tcx> {
         for &borrow_idx in borrows_for_place_base {
             let borrow = &self.borrow_set[borrow_idx];
 
-            if !self.borrow_maybe_active_at(borrow_idx, borrow, location) {
+            if borrow.borrowed_place.local != place.local {
                 continue;
             }
 
-            if !places_conflict::borrow_conflicts_with_place(
-                self.infcx.infcx.tcx,
-                self.body,
-                borrow.borrowed_place,
-                borrow.kind,
-                place.as_ref(),
-                sd,
-                places_conflict::PlaceConflictBias::Overlap,
-            ) {
+            if !self.borrow_maybe_active_at(borrow_idx, borrow, location) {
                 continue;
             }
 
@@ -1118,6 +1110,18 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, '_, 'tcx> {
                 }
 
                 (Read(kind), BorrowKind::Mut { .. }) => {
+                    if !places_conflict::borrow_conflicts_with_place(
+                        self.infcx.infcx.tcx,
+                        self.body,
+                        borrow.borrowed_place,
+                        borrow.kind,
+                        place.as_ref(),
+                        sd,
+                        places_conflict::PlaceConflictBias::Overlap,
+                    ) {
+                        continue;
+                    }
+
                     // Reading from mere reservations of mutable-borrows is OK.
                     if !is_active(self.dominators(), borrow, location) {
                         assert!(borrow.kind.allows_two_phase_borrow());
@@ -1144,6 +1148,18 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, '_, 'tcx> {
                 }
 
                 (Reservation(kind) | Activation(kind, _) | Write(kind), _) => {
+                    if !places_conflict::borrow_conflicts_with_place(
+                        self.infcx.infcx.tcx,
+                        self.body,
+                        borrow.borrowed_place,
+                        borrow.kind,
+                        place.as_ref(),
+                        sd,
+                        places_conflict::PlaceConflictBias::Overlap,
+                    ) {
+                        continue;
+                    }
+
                     if !self.borrow_is_active_at(state, borrow_idx, borrow, location) {
                         continue;
                     }

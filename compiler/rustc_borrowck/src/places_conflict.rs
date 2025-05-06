@@ -128,7 +128,6 @@ pub(super) fn borrow_conflicts_with_place<'tcx>(
 }
 
 #[instrument(level = "debug", skip(tcx, body))]
-#[inline(never)] // FIXME: Remove this.
 fn place_components_conflict<'tcx>(
     tcx: TyCtxt<'tcx>,
     body: &Body<'tcx>,
