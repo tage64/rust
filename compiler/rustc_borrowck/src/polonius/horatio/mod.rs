@@ -345,22 +345,24 @@ impl<'a, 'tcx> Polonius<'a, 'tcx> {
         location: Location,
     ) -> bool {
         let maybe_borrow_data = self.borrows.ensure_contains_elem(borrow_idx, || None);
-        match maybe_borrow_data {
+        let (kills_cache, scope_computation) = match maybe_borrow_data {
             Some(PoloniusBorrowData::Ignored) => return false,
-            Some(PoloniusBorrowData::Data {
-                scope_computation: Some(scope_computation), ..
-            }) => {
-                // Check if we have already computed an "in scope-value" for location.
-                if scope_computation.is_finished {
-                    // If the scope computation is finished, it's appropriate to return `false` if no
-                    // node for the location exists.
-                    return scope_computation.nodes.get(&location).is_some_and(|x| x.is_active);
+            Some(PoloniusBorrowData::Data { scope_computation, kills_cache }) => {
+                if let Some(scope_computation) = &scope_computation {
+                    // Check if we have already computed an "in scope-value" for location.
+                    if scope_computation.is_finished {
+                        // If the scope computation is finished, it's appropriate to return `false` if no
+                        // node for the location exists.
+                        return scope_computation.nodes.get(&location).is_some_and(|x| x.is_active);
 
-                    // If the computation is not finished, we can only be sure if the `in_scope`-field
-                    // has been set to `true` for the relevant node.
-                } else if scope_computation.nodes.get(&location).is_some_and(|x| x.is_active) {
-                    return true;
+                        // If the computation is not finished, we can only be sure if the `in_scope`-field
+                        // has been set to `true` for the relevant node.
+                    } else if scope_computation.nodes.get(&location).is_some_and(|x| x.is_active) {
+                        return true;
+                    }
                 }
+
+                (kills_cache, scope_computation)
             }
             None => {
                 // Check if this borrow is ignored.
@@ -372,41 +374,19 @@ impl<'a, 'tcx> Polonius<'a, 'tcx> {
                     *maybe_borrow_data = Some(PoloniusBorrowData::Ignored);
                     return false;
                 }
-            }
-            Some(PoloniusBorrowData::Data { scope_computation: None, .. }) => (),
-        };
 
-        let maybe_borrow_data = &mut self.borrows[borrow_idx];
-        match maybe_borrow_data {
-            Some(PoloniusBorrowData::Ignored) => unreachable!(),
-            Some(PoloniusBorrowData::Data {
-                scope_computation: Some(scope_computation), ..
-            }) => {
-                // Check if we have already computed an "in scope-value" for location.
-                if scope_computation.is_finished {
-                    // If the scope computation is finished, it's appropriate to return `false` if no
-                    // node for the location exists.
-                    return scope_computation.nodes.get(&location).is_some_and(|x| x.is_active);
-
-                    // If the computation is not finished, we can only be sure if the `in_scope`-field
-                    // has been set to `true` for the relevant node.
-                } else if scope_computation.nodes.get(&location).is_some_and(|x| x.is_active) {
-                    return true;
-                }
-            }
-            Some(PoloniusBorrowData::Data { .. }) => (),
-            None => {
                 *maybe_borrow_data = Some(PoloniusBorrowData::Data {
                     kills_cache: IndexVec::new(),
                     scope_computation: None,
                 });
-            }
-        };
 
-        let Some(PoloniusBorrowData::Data { kills_cache, scope_computation, .. }) =
-            maybe_borrow_data
-        else {
-            unreachable!()
+                let Some(PoloniusBorrowData::Data { kills_cache, scope_computation }) =
+                    maybe_borrow_data
+                else {
+                    unreachable!()
+                };
+                (kills_cache, scope_computation)
+            }
         };
 
         let bcx = BorrowContext { pcx: &self.pcx, borrow_idx, borrow };
