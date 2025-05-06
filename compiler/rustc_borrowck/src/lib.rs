@@ -1068,7 +1068,7 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, '_, 'tcx> {
         for &borrow_idx in borrows_for_place_base {
             let borrow = &self.borrow_set[borrow_idx];
 
-            if !self.borrow_maybe_in_scope_at(borrow_idx, borrow, location) {
+            if !self.borrow_maybe_active_at(borrow_idx, borrow, location) {
                 continue;
             }
 
@@ -1124,7 +1124,7 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, '_, 'tcx> {
                         continue;
                     }
 
-                    if !self.borrow_in_scope_at(state, borrow_idx, borrow, location) {
+                    if !self.borrow_is_active_at(state, borrow_idx, borrow, location) {
                         continue;
                     }
 
@@ -1144,7 +1144,7 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, '_, 'tcx> {
                 }
 
                 (Reservation(kind) | Activation(kind, _) | Write(kind), _) => {
-                    if !self.borrow_in_scope_at(state, borrow_idx, borrow, location) {
+                    if !self.borrow_is_active_at(state, borrow_idx, borrow, location) {
                         continue;
                     }
 
@@ -1200,25 +1200,20 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, '_, 'tcx> {
     }
 
     #[inline]
-    fn borrow_maybe_in_scope_at(
+    fn borrow_maybe_active_at(
         &mut self,
         borrow_idx: BorrowIndex,
         borrow: &BorrowData<'tcx>,
         location: Location,
     ) -> bool {
         if let Some(ref mut scopes_computer) = self.polonius {
-            scopes_computer.loan_maybe_in_scope_at(borrow_idx, borrow, location)
+            scopes_computer.loan_maybe_active_at(borrow_idx, borrow, location)
         } else {
             true
         }
     }
 
-    /// Checks whether a borrow is in scope.
-    ///
-    /// If NLL is used, it will just check in `state.borrows`, but if Polonius is used it will ask
-    /// Polonius for a result. This might be a potentially expensive computation so you should not
-    /// call this method unless you have to.
-    fn borrow_in_scope_at(
+    fn borrow_is_active_at(
         &mut self,
         state: &BorrowckDomain,
         borrow_idx: BorrowIndex,
@@ -1226,7 +1221,7 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, '_, 'tcx> {
         location: Location,
     ) -> bool {
         if let Some(ref mut polonius) = self.polonius {
-            polonius.loan_in_scope_at(borrow_idx, borrow, location)
+            polonius.loan_is_active_at(borrow_idx, borrow, location)
         } else {
             let borrows_in_scope = self.borrows_in_scope(location, state);
             borrows_in_scope.contains(borrow_idx)
@@ -1255,7 +1250,7 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, '_, 'tcx> {
         for &borrow_idx in borrows_for_place_base {
             let borrow = &self.borrow_set[borrow_idx];
 
-            if !self.borrow_maybe_in_scope_at(borrow_idx, borrow, location) {
+            if !self.borrow_maybe_active_at(borrow_idx, borrow, location) {
                 continue;
             }
 
@@ -1272,7 +1267,7 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, '_, 'tcx> {
             }
 
             // Check if the loan is in scope.
-            if !self.borrow_in_scope_at(state, borrow_idx, borrow, location) {
+            if !self.borrow_is_active_at(state, borrow_idx, borrow, location) {
                 continue;
             }
 
@@ -1318,7 +1313,7 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, '_, 'tcx> {
         for &borrow_idx in borrows_for_place_base {
             let borrow = &self.borrow_set[borrow_idx];
 
-            if !self.borrow_maybe_in_scope_at(borrow_idx, borrow, location) {
+            if !self.borrow_maybe_active_at(borrow_idx, borrow, location) {
                 continue;
             }
             if !places_conflict::borrow_conflicts_with_place(
@@ -1338,7 +1333,7 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, '_, 'tcx> {
             }
 
             // Check if the borrow is in scope.
-            if !self.borrow_in_scope_at(state, borrow_idx, borrow, location) {
+            if !self.borrow_is_active_at(state, borrow_idx, borrow, location) {
                 continue;
             }
 
@@ -1736,7 +1731,7 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, '_, 'tcx> {
 
         let sd = if might_be_alive { Deep } else { Shallow(None) };
 
-        if self.borrow_maybe_in_scope_at(borrow_idx, borrow, location)
+        if self.borrow_maybe_active_at(borrow_idx, borrow, location)
             && places_conflict::borrow_conflicts_with_place(
                 self.infcx.tcx,
                 self.body,
@@ -1746,7 +1741,7 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, '_, 'tcx> {
                 sd,
                 places_conflict::PlaceConflictBias::Overlap,
             )
-            && self.borrow_in_scope_at(state, borrow_idx, borrow, location)
+            && self.borrow_is_active_at(state, borrow_idx, borrow, location)
         {
             debug!("check_for_invalidation_at_exit({:?}): INVALID", place);
             // FIXME: should be talking about the region lifetime instead
@@ -1774,8 +1769,8 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, '_, 'tcx> {
         debug!("check_for_local_borrow({:?})", borrow);
 
         if borrow_of_local_data(borrow.borrowed_place)
-            && self.borrow_maybe_in_scope_at(borrow_idx, borrow, location)
-            && self.borrow_in_scope_at(state, borrow_idx, borrow, location)
+            && self.borrow_maybe_active_at(borrow_idx, borrow, location)
+            && self.borrow_is_active_at(state, borrow_idx, borrow, location)
         {
             let err = self.cannot_borrow_across_coroutine_yield(
                 self.retrieve_borrow_spans(borrow).var_or_use(),

@@ -307,9 +307,17 @@ impl<'a, 'tcx> Polonius<'a, 'tcx> {
         }
     }
 
-    /// Quick check to check if the loan is in scope.
+    /// Quick check to check if a loan is active at a certain point in the CFG.
+    ///
+    /// If this function returns `false`, we know for sure that the loan is not active at
+    /// `location`, otherwise it may or may not be active.
+    ///
+    /// The purpose of this function is to be really quick. In most cases it will return `false` and
+    /// no conflict is therefore possible. In the rare situations it returns `true`, the caller
+    /// should proceed with other more time consuming methods of checking for a conflict and
+    /// eventually call the [`Polonius::loan_is_active`] function which will give a definite answer.
     #[inline]
-    pub(crate) fn loan_maybe_in_scope_at(
+    pub(crate) fn loan_maybe_active_at(
         &mut self,
         borrow_idx: BorrowIndex,
         borrow: &BorrowData<'tcx>,
@@ -329,9 +337,8 @@ impl<'a, 'tcx> Polonius<'a, 'tcx> {
         true
     }
 
-    /// Check if a loan is in scope at a location.
-    #[inline(never)] // Remove this.
-    pub(crate) fn loan_in_scope_at(
+    /// Check if a loan is is active at a point in the CFG.
+    pub(crate) fn loan_is_active_at(
         &mut self,
         borrow_idx: BorrowIndex,
         borrow: &BorrowData<'tcx>,
